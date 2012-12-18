@@ -1,25 +1,26 @@
 package akka.remote
 
+import scala.language.postfixOps
 import akka.actor.SupervisorStrategy._
 import akka.actor._
 import akka.event.{ Logging, LoggingAdapter }
-import akka.pattern.gracefulStop
-import akka.remote.EndpointManager.{ StartupFinished, Listen, Send }
-import akka.remote.transport.Transport.InboundAssociation
+import akka.japi.Util.immutableSeq
+import akka.pattern.{ gracefulStop, pipe, ask }
+import akka.remote.EndpointManager._
+import akka.remote.Remoting.TransportSupervisor
+import akka.remote.transport.Transport.{ ActorAssociationEventListener, AssociationEventListener, InboundAssociation }
 import akka.remote.transport._
 import akka.util.Timeout
 import com.typesafe.config.Config
+import java.net.URLEncoder
+import java.util.concurrent.TimeoutException
 import scala.collection.immutable.{ Seq, HashMap }
 import scala.concurrent.duration._
 import scala.concurrent.{ Promise, Await, Future }
 import scala.util.control.NonFatal
-import java.net.URLEncoder
-import java.util.concurrent.TimeoutException
 import scala.util.{ Failure, Success }
-import scala.collection.immutable
-import akka.japi.Util.immutableSeq
 
-class RemotingSettings(config: Config) {
+class RemotingSettings(val config: Config) {
 
   import config._
   import scala.collection.JavaConverters._
@@ -28,9 +29,11 @@ class RemotingSettings(config: Config) {
 
   val ShutdownTimeout: FiniteDuration = Duration(getMilliseconds("akka.remoting.shutdown-timeout"), MILLISECONDS)
 
+  val FlushWait: FiniteDuration = Duration(getMilliseconds("akka.remoting.flush-wait-on-shutdown"), MILLISECONDS)
+
   val StartupTimeout: FiniteDuration = Duration(getMilliseconds("akka.remoting.startup-timeout"), MILLISECONDS)
 
-  val RetryGateClosedFor: Long = getMilliseconds("akka.remoting.retry-gate-closed-for")
+  val RetryGateClosedFor: Long = getNanoseconds("akka.remoting.retry-gate-closed-for")
 
   val UsePassiveConnections: Boolean = getBoolean("akka.remoting.use-passive-connections")
 
@@ -41,10 +44,33 @@ class RemotingSettings(config: Config) {
   val BackoffPeriod: FiniteDuration =
     Duration(getMilliseconds("akka.remoting.backoff-interval"), MILLISECONDS)
 
-  val Transports: immutable.Seq[(String, Config)] =
-    immutableSeq(config.getConfigList("akka.remoting.transports")).map {
-      conf ⇒ (conf.getString("transport-class"), conf.getConfig("settings"))
-    }
+  val Transports: Seq[(String, Seq[String], Config)] = transportNames.map { name ⇒
+    val transportConfig = transportConfigFor(name)
+    (transportConfig.getString("transport-class"),
+      immutableSeq(transportConfig.getStringList("applied-adapters")),
+      transportConfig)
+  }
+
+  val Adapters: Map[String, String] = configToMap(getConfig("akka.remoting.adapters"))
+
+  private def transportNames: Seq[String] = immutableSeq(getStringList("akka.remoting.enabled-transports"))
+
+  private def transportConfigFor(transportName: String): Config = getConfig("akka.remoting.transports." + transportName)
+
+  private def configToMap(cfg: Config): Map[String, String] =
+    cfg.root.unwrapped.asScala.toMap.map { case (k, v) ⇒ (k, v.toString) }
+}
+
+private[remote] object AddressUrlEncoder {
+  def apply(address: Address): String = URLEncoder.encode(address.toString, "utf-8")
+}
+
+private[remote] case class RARP(provider: RemoteActorRefProvider) extends Extension
+private[remote] object RARP extends ExtensionId[RARP] with ExtensionIdProvider {
+
+  override def lookup() = RARP
+
+  override def createExtension(system: ExtendedActorSystem) = RARP(system.provider.asInstanceOf[RemoteActorRefProvider])
 }
 
 private[remote] object Remoting {
@@ -60,7 +86,7 @@ private[remote] object Remoting {
         responsibleTransports.size match {
           case 0 ⇒
             throw new RemoteTransportException(
-              s"No transport is responsible for address: [${remote}] although protocol [${remote.protocol}] is available." +
+              s"No transport is responsible for address: ${remote} although protocol ${remote.protocol} is available." +
                 " Make sure at least one transport is configured to be responsible for the address.",
               null)
 
@@ -74,7 +100,20 @@ private[remote] object Remoting {
                 "so that only one transport is responsible for the address.",
               null)
         }
-      case None ⇒ throw new RemoteTransportException(s"No transport is loaded for protocol: ${remote.protocol}", null)
+      case None ⇒ throw new RemoteTransportException(
+        s"No transport is loaded for protocol: ${remote.protocol}, available protocols: ${transportMapping.keys.mkString}", null)
+    }
+  }
+
+  case class RegisterTransportActor(props: Props, name: String)
+
+  private[Remoting] class TransportSupervisor extends Actor {
+    override def supervisorStrategy = OneForOneStrategy() {
+      case NonFatal(e) ⇒ Restart
+    }
+
+    def receive = {
+      case RegisterTransportActor(props, name) ⇒ sender ! context.actorOf(props, name)
     }
   }
 
@@ -82,13 +121,18 @@ private[remote] object Remoting {
 
 private[remote] class Remoting(_system: ExtendedActorSystem, _provider: RemoteActorRefProvider) extends RemoteTransport(_system, _provider) {
 
-  @volatile private var endpointManager: ActorRef = _
+  @volatile private var endpointManager: Option[ActorRef] = None
   @volatile private var transportMapping: Map[String, Set[(Transport, Address)]] = _
+  // This is effectively a write-once variable similar to a lazy val. The reason for not using a lazy val is exception
+  // handling.
   @volatile var addresses: Set[Address] = _
-  // FIXME: Temporary workaround until next Pull Request as the means of configuration changed
-  override def defaultAddress: Address = addresses.head
+  // This variable has the same semantics as the addresses variable, in the sense it is written once, and emulates
+  // a lazy val
+  @volatile var defaultAddress: Address = _
 
   private val settings = new RemotingSettings(provider.remoteSettings.config)
+
+  val transportSupervisor = system.asInstanceOf[ActorSystemImpl].systemActorOf(Props[TransportSupervisor], "transports")
 
   override def localAddressForRemote(remote: Address): Address = Remoting.localAddressForRemote(transportMapping, remote)
 
@@ -98,54 +142,72 @@ private[remote] class Remoting(_system: ExtendedActorSystem, _provider: RemoteAc
   private def notifyError(msg: String, cause: Throwable): Unit =
     eventPublisher.notifyListeners(RemotingErrorEvent(new RemoteTransportException(msg, cause)))
 
-  override def shutdown(): Unit = {
-    if (endpointManager != null) {
-      try {
-        val stopped: Future[Boolean] = gracefulStop(endpointManager, settings.ShutdownTimeout)(system)
+  override def shutdown(): Future[Unit] = {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    endpointManager match {
+      case Some(manager) ⇒
+        implicit val timeout = new Timeout(settings.ShutdownTimeout)
+        val stopped: Future[Boolean] = (manager ? ShutdownAndFlush).mapTo[Boolean]
 
-        if (Await.result(stopped, settings.ShutdownTimeout)) {
+        def finalize(): Unit = {
           eventPublisher.notifyListeners(RemotingShutdownEvent)
+          endpointManager = None
         }
 
-      } catch {
-        case e: TimeoutException ⇒ notifyError("Shutdown timed out.", e)
-        case NonFatal(e)         ⇒ notifyError("Shutdown failed.", e)
-      } finally {
-        endpointManager = null
-      }
+        stopped.onComplete {
+          case Success(flushSuccessful) ⇒
+            if (!flushSuccessful)
+              log.warning("Shutdown finished, but flushing timed out. Some messages might not have been sent. " +
+                "Increase akka.remoting.flush-wait-on-shutdown to a larger value to avoid this.")
+            finalize()
+
+          case Failure(e) ⇒
+            notifyError("Failure during shutdown of remoting.", e)
+            finalize()
+        }
+
+        stopped map { _ ⇒ () } // RARP needs only type Unit, not a boolean
+      case None ⇒
+        log.warning("Remoting is not running. Ignoring shutdown attempt.")
+        Future successful ()
     }
   }
 
   // Start assumes that it cannot be followed by another start() without having a shutdown() first
   override def start(): Unit = {
-    if (endpointManager eq null) {
-      log.info("Starting remoting")
-      endpointManager = system.asInstanceOf[ActorSystemImpl].systemActorOf(
-        Props(new EndpointManager(provider.remoteSettings.config, log)), Remoting.EndpointManagerName)
+    endpointManager match {
+      case None ⇒
+        log.info("Starting remoting")
+        val manager: ActorRef = system.asInstanceOf[ActorSystemImpl].systemActorOf(
+          Props(new EndpointManager(provider.remoteSettings.config, log)), Remoting.EndpointManagerName)
+        endpointManager = Some(manager)
 
-      implicit val timeout = new Timeout(settings.StartupTimeout)
+        implicit val timeout = new Timeout(settings.StartupTimeout)
 
-      try {
-        val addressesPromise: Promise[Set[(Transport, Address)]] = Promise()
-        endpointManager ! Listen(addressesPromise)
+        try {
+          val addressesPromise: Promise[Seq[(Transport, Address)]] = Promise()
+          manager ! Listen(addressesPromise)
 
-        val transports: Set[(Transport, Address)] = Await.result(addressesPromise.future, timeout.duration)
-        transportMapping = transports.groupBy { case (transport, _) ⇒ transport.schemeIdentifier }.mapValues {
-          _.toSet
+          val transports: Seq[(Transport, Address)] = Await.result(addressesPromise.future, timeout.duration)
+          if (transports.isEmpty) throw new RemoteTransportException("No transport drivers were loaded.", null)
+
+          transportMapping = transports.groupBy { case (transport, _) ⇒ transport.schemeIdentifier }.mapValues {
+            _.toSet
+          }
+
+          defaultAddress = transports.head._2
+          addresses = transports.map { _._2 }.toSet
+
+          manager ! StartupFinished
+          eventPublisher.notifyListeners(RemotingListenEvent(addresses))
+
+        } catch {
+          case e: TimeoutException ⇒ notifyError("Startup timed out", e)
+          case NonFatal(e)         ⇒ notifyError("Startup failed", e)
         }
 
-        endpointManager ! StartupFinished
-
-        addresses = transports.map { _._2 }.toSet
-        eventPublisher.notifyListeners(RemotingListenEvent(addresses))
-
-      } catch {
-        case e: TimeoutException ⇒ notifyError("Startup timed out", e)
-        case NonFatal(e)         ⇒ notifyError("Startup failed", e)
-      }
-
-    } else {
-      log.warning("Remoting was already started. Ignoring start attempt.")
+      case Some(_) ⇒
+        log.warning("Remoting was already started. Ignoring start attempt.")
     }
   }
 
@@ -160,8 +222,17 @@ private[remote] class Remoting(_system: ExtendedActorSystem, _provider: RemoteAc
     // Ignore
   }
 
-  override def send(message: Any, senderOption: Option[ActorRef], recipient: RemoteActorRef): Unit = {
-    endpointManager.tell(Send(message, senderOption, recipient), sender = Actor.noSender)
+  override def send(message: Any, senderOption: Option[ActorRef], recipient: RemoteActorRef): Unit = endpointManager match {
+    case Some(manager) ⇒ manager.tell(Send(message, senderOption, recipient), sender = senderOption getOrElse Actor.noSender)
+    case None          ⇒ throw new IllegalStateException("Attempted to send remote message but Remoting is not running.")
+  }
+
+  override def managementCommand(cmd: Any): Future[Boolean] = endpointManager match {
+    case Some(manager) ⇒
+      val statusPromise = Promise[Boolean]()
+      manager.tell(ManagementCommand(cmd, statusPromise), sender = Actor.noSender)
+      statusPromise.future
+    case None ⇒ throw new IllegalStateException("Attempted to send management command but Remoting is not running.")
   }
 
   // Not used anywhere only to keep compatibility with RemoteTransport interface
@@ -174,20 +245,25 @@ private[remote] class Remoting(_system: ExtendedActorSystem, _provider: RemoteAc
 
 private[remote] object EndpointManager {
 
+  // Messages between Remoting and EndpointManager
   sealed trait RemotingCommand
-  case class Listen(addressesPromise: Promise[Set[(Transport, Address)]]) extends RemotingCommand
+  case class Listen(addressesPromise: Promise[Seq[(Transport, Address)]]) extends RemotingCommand
   case object StartupFinished extends RemotingCommand
-
+  case object ShutdownAndFlush extends RemotingCommand
   case class Send(message: Any, senderOption: Option[ActorRef], recipient: RemoteActorRef) extends RemotingCommand {
     override def toString = s"Remote message $senderOption -> $recipient"
   }
+  case class ManagementCommand(cmd: Any, statusPromise: Promise[Boolean]) extends RemotingCommand
+
+  // Messages internal to EndpointManager
+  case object Prune
+  case class ListensResult(addressesPromise: Promise[Seq[(Transport, Address)]],
+                           results: Seq[(Transport, Address, Promise[AssociationEventListener])])
 
   sealed trait EndpointPolicy
   case class Pass(endpoint: ActorRef) extends EndpointPolicy
   case class Gated(timeOfFailure: Long) extends EndpointPolicy
   case class Quarantined(reason: Throwable) extends EndpointPolicy
-
-  case object Prune
 
   // Not threadsafe -- only to be used in HeadActor
   private[EndpointManager] class EndpointRegistry {
@@ -228,9 +304,11 @@ private[remote] object EndpointManager {
       endpoint
     }
 
+    def isPassive(endpoint: ActorRef): Boolean = addressToPassive.contains(endpointToAddress(endpoint))
+
     def markFailed(endpoint: ActorRef, timeOfFailure: Long): Unit = {
       addressToEndpointAndPolicy += endpointToAddress(endpoint) -> Gated(timeOfFailure)
-      endpointToAddress = endpointToAddress - endpoint
+      if (!isPassive(endpoint)) endpointToAddress = endpointToAddress - endpoint
     }
 
     def markQuarantine(address: Address, reason: Throwable): Unit =
@@ -238,16 +316,17 @@ private[remote] object EndpointManager {
 
     def removeIfNotGated(endpoint: ActorRef): Unit = {
       endpointToAddress.get(endpoint) foreach { address ⇒
-        addressToEndpointAndPolicy.get(address) foreach { policy ⇒
-          policy match {
-            case Pass(_) ⇒
-              addressToEndpointAndPolicy = addressToEndpointAndPolicy - address
-              endpointToAddress = endpointToAddress - endpoint
-            case _ ⇒
-          }
+        addressToEndpointAndPolicy.get(address) foreach {
+          case Pass(_) ⇒ addressToEndpointAndPolicy = addressToEndpointAndPolicy - address
+          case _       ⇒
         }
+
+        endpointToAddress = endpointToAddress - endpoint
+        addressToPassive = addressToPassive - address
       }
     }
+
+    def allEndpoints: Iterable[ActorRef] = endpointToAddress.keys
   }
 }
 
@@ -268,7 +347,7 @@ private[remote] class EndpointManager(conf: Config, log: LoggingAdapter) extends
   // Mapping between transports and the local addresses they listen to
   var transportMapping: Map[Address, Transport] = Map()
 
-  val retryGateEnabled = settings.RetryGateClosedFor > 0L
+  def retryGateEnabled = settings.RetryGateClosedFor > 0L
   val pruneInterval: Long = if (retryGateEnabled) settings.RetryGateClosedFor * 2L else 0L
   val pruneTimerCancellable: Option[Cancellable] = if (retryGateEnabled)
     Some(context.system.scheduler.schedule(pruneInterval milliseconds, pruneInterval milliseconds, self, Prune))
@@ -293,29 +372,59 @@ private[remote] class EndpointManager(conf: Config, log: LoggingAdapter) extends
   }
 
   def receive = {
-    case Listen(addressesPromise) ⇒ try initializeTransports(addressesPromise) catch {
-      case NonFatal(e) ⇒
-        addressesPromise.failure(e)
-        context.stop(self)
-    }
-
-    case StartupFinished ⇒ context.become(accepting)
+    case Listen(addressesPromise) ⇒
+      listens map { ListensResult(addressesPromise, _) } pipeTo self
+    case ListensResult(addressesPromise, results) ⇒
+      transportMapping = results.groupBy {
+        case (_, transportAddress, _) ⇒ transportAddress
+      } map {
+        case (a, t) if t.size > 1 ⇒
+          throw new RemoteTransportException(s"There are more than one transports listening on local address [$a]", null)
+        case (a, t) ⇒ a -> t.head._1
+      }
+      // Register to each transport as listener and collect mapping to addresses
+      val transportsAndAddresses = results map {
+        case (transport, address, promise) ⇒
+          promise.success(ActorAssociationEventListener(self))
+          transport -> address
+      }
+      addressesPromise.success(transportsAndAddresses)
+    case ManagementCommand(_, statusPromise) ⇒
+      statusPromise.success(false)
+    case StartupFinished ⇒
+      context.become(accepting)
+    case ShutdownAndFlush ⇒
+      sender ! true
+      context.stop(self) // Nothing to flush at this point
   }
 
   val accepting: Receive = {
+    case ManagementCommand(cmd, statusPromise) ⇒
+      transportMapping.values foreach { _.managementCommand(cmd, statusPromise) }
+
     case s @ Send(message, senderOption, recipientRef) ⇒
       val recipientAddress = recipientRef.path.address
 
       endpoints.getEndpointWithPolicy(recipientAddress) match {
         case Some(Pass(endpoint)) ⇒ endpoint ! s
         case Some(Gated(timeOfFailure)) ⇒ if (retryGateOpen(timeOfFailure)) {
-          val endpoint = createEndpoint(recipientAddress, recipientRef.localAddressToUse, None)
+          val endpoint = createEndpoint(
+            recipientAddress,
+            recipientRef.localAddressToUse,
+            transportMapping(recipientRef.localAddressToUse),
+            settings,
+            None)
           endpoints.registerActiveEndpoint(recipientAddress, endpoint)
           endpoint ! s
-        } else extendedSystem.deadLetters ! message
-        case Some(Quarantined(_)) ⇒ extendedSystem.deadLetters ! message
+        } else forwardToDeadLetters(s)
+        case Some(Quarantined(_)) ⇒ forwardToDeadLetters(s)
         case None ⇒
-          val endpoint = createEndpoint(recipientAddress, recipientRef.localAddressToUse, None)
+          val endpoint = createEndpoint(
+            recipientAddress,
+            recipientRef.localAddressToUse,
+            transportMapping(recipientRef.localAddressToUse),
+            settings,
+            None)
           endpoints.registerActiveEndpoint(recipientAddress, endpoint)
           endpoint ! s
 
@@ -324,7 +433,12 @@ private[remote] class EndpointManager(conf: Config, log: LoggingAdapter) extends
     case InboundAssociation(handle) ⇒ endpoints.passiveEndpointFor(handle.remoteAddress) match {
       case Some(endpoint) ⇒ endpoint ! EndpointWriter.TakeOver(handle)
       case None ⇒
-        val endpoint = createEndpoint(handle.remoteAddress, handle.localAddress, Some(handle))
+        val endpoint = createEndpoint(
+          handle.remoteAddress,
+          handle.localAddress,
+          transportMapping(handle.localAddress),
+          settings,
+          Some(handle))
         eventPublisher.notifyListeners(AssociatedEvent(handle.localAddress, handle.remoteAddress, true))
         if (settings.UsePassiveConnections && !endpoints.hasActiveEndpointFor(handle.remoteAddress)) {
           endpoints.registerActiveEndpoint(handle.remoteAddress, endpoint)
@@ -332,16 +446,49 @@ private[remote] class EndpointManager(conf: Config, log: LoggingAdapter) extends
           endpoints.registerPassiveEndpoint(handle.remoteAddress, endpoint)
         else handle.disassociate()
     }
-    case Terminated(endpoint) ⇒ endpoints.removeIfNotGated(endpoint);
-    case Prune                ⇒ endpoints.prune(settings.RetryGateClosedFor)
+    case Terminated(endpoint) ⇒
+      endpoints.removeIfNotGated(endpoint)
+    case Prune ⇒
+      endpoints.prune(settings.RetryGateClosedFor)
+    case ShutdownAndFlush ⇒
+      // Shutdown all endpoints and signal to sender when ready (and whether all endpoints were shut down gracefully)
+      val sys = context.system // Avoid closing over context
+      Future sequence endpoints.allEndpoints.map {
+        gracefulStop(_, settings.FlushWait)(sys)
+      } map { _.foldLeft(true) { _ && _ } } pipeTo sender
+      // Ignore all other writes
+      context.become(flushing)
   }
 
-  private def initializeTransports(addressesPromise: Promise[Set[(Transport, Address)]]): Unit = {
-    val transports = for ((fqn, config) ← settings.Transports) yield {
+  def flushing: Receive = {
+    case s: Send               ⇒ forwardToDeadLetters(s)
+    case InboundAssociation(h) ⇒ h.disassociate()
+  }
+
+  private def forwardToDeadLetters(s: Send): Unit = {
+    val sender = s.senderOption match {
+      case Some(sender) ⇒ sender
+      case None         ⇒ Actor.noSender
+    }
+    extendedSystem.deadLetters.tell(s.message, sender)
+  }
+
+  private def listens: Future[Seq[(Transport, Address, Promise[AssociationEventListener])]] = {
+    /*
+     * Constructs chains of adapters on top of each driver as given in configuration. The resulting structure looks
+     * like the following:
+     *   AkkaProtocolTransport <- Adapter <- ... <- Adapter <- Driver
+     *
+     * The transports variable contains only the heads of each chains (the AkkaProtocolTransport instances).
+     */
+    val transports: Seq[AkkaProtocolTransport] = for ((fqn, adapters, config) ← settings.Transports) yield {
 
       val args = Seq(classOf[ExtendedActorSystem] -> context.system, classOf[Config] -> config)
 
-      val wrappedTransport = extendedSystem.dynamicAccess
+      // Loads the driver -- the bottom element of the chain.
+      // The chain at this point:
+      //   Driver
+      val driver = extendedSystem.dynamicAccess
         .createInstanceFor[Transport](fqn, args).recover({
 
           case exception ⇒ throw new IllegalArgumentException(
@@ -351,51 +498,45 @@ private[remote] class EndpointManager(conf: Config, log: LoggingAdapter) extends
 
         }).get
 
-      new AkkaProtocolTransport(wrappedTransport, context.system, new AkkaProtocolSettings(conf), AkkaPduProtobufCodec)
-
-    }
-
-    val listens: Future[Seq[(Transport, (Address, Promise[ActorRef]))]] = Future.sequence(
-      transports.map { transport ⇒ transport.listen map (transport -> _) })
-
-    listens.onComplete {
-      case Success(results) ⇒
-        transportMapping = results.groupBy {
-          case (_, (transportAddress, _)) ⇒ transportAddress
-        } map {
-          case (a, t) if t.size > 1 ⇒
-            throw new RemoteTransportException(s"There are more than one transports listening on local address [$a]", null)
-          case (a, t) ⇒ a -> t.head._1
+      // Iteratively decorates the bottom level driver with a list of adapters.
+      // The chain at this point:
+      //   Adapter <- ... <- Adapter <- Driver
+      val wrappedTransport =
+        adapters.map { TransportAdaptersExtension.get(context.system).getAdapterProvider(_) }.foldLeft(driver) {
+          (t: Transport, provider: TransportAdapterProvider) ⇒
+            // The TransportAdapterProvider will wrap the given Transport and returns with a wrapped one
+            provider(t, context.system.asInstanceOf[ExtendedActorSystem])
         }
 
-        val transportsAndAddresses = (for ((transport, (address, promise)) ← results) yield {
-          promise.success(self)
-          transport -> address
-        }).toSet
-        addressesPromise.success(transportsAndAddresses)
-
-      case Failure(reason) ⇒ addressesPromise.failure(reason)
+      // Apply AkkaProtocolTransport wrapper to the end of the chain
+      // The chain at this point:
+      //   AkkaProtocolTransport <- Adapter <- ... <- Adapter <- Driver
+      new AkkaProtocolTransport(wrappedTransport, context.system, new AkkaProtocolSettings(conf), AkkaPduProtobufCodec)
     }
+
+    // Collect all transports, listen addresses and listener promises in one future
+    Future.sequence(transports.map { transport ⇒
+      transport.listen map { case (address, listenerPromise) ⇒ (transport, address, listenerPromise) }
+    })
   }
 
   private def createEndpoint(remoteAddress: Address,
                              localAddress: Address,
+                             transport: Transport,
+                             endpointSettings: RemotingSettings,
                              handleOption: Option[AssociationHandle]): ActorRef = {
-    assert(transportMapping contains (localAddress))
+    assert(transportMapping contains localAddress)
 
-    val endpoint = context.actorOf(Props(
+    context.watch(context.actorOf(Props(
       new EndpointWriter(
         handleOption,
         localAddress,
         remoteAddress,
-        transportMapping(localAddress),
-        settings,
+        transport,
+        endpointSettings,
         AkkaPduProtobufCodec))
       .withDispatcher("akka.remoting.writer-dispatcher"),
-      "endpointWriter-" + URLEncoder.encode(remoteAddress.toString, "utf-8") + "-" + endpointId.next())
-
-    context.watch(endpoint) // TODO: see what to do with this
-
+      "endpointWriter-" + AddressUrlEncoder(remoteAddress) + "-" + endpointId.next()))
   }
 
   private def retryGateOpen(timeOfFailure: Long): Boolean = (timeOfFailure + settings.RetryGateClosedFor) < System.nanoTime()
@@ -405,7 +546,7 @@ private[remote] class EndpointManager(conf: Config, log: LoggingAdapter) extends
     transportMapping.values foreach { transport ⇒
       try transport.shutdown() catch {
         case NonFatal(e) ⇒
-          log.error(e, s"Unable to shut down the underlying Transport: [$transport]")
+          log.error(e, s"Unable to shut down the underlying transport: [$transport]")
       }
     }
   }
