@@ -12,20 +12,21 @@ import akka.remote.transport.AssociationHandle._
 import akka.remote.transport.{ AkkaPduCodec, Transport, AssociationHandle }
 import akka.serialization.Serialization
 import akka.util.ByteString
-import java.net.URLEncoder
 import scala.util.control.NonFatal
-import akka.actor.SupervisorStrategy.{ Restart, Stop }
 
-trait InboundMessageDispatcher {
+/**
+ * Internal API
+ */
+private[remote] trait InboundMessageDispatcher {
   def dispatch(recipient: InternalActorRef,
                recipientAddress: Address,
                serializedMessage: MessageProtocol,
                senderOption: Option[ActorRef]): Unit
 }
 
-class DefaultMessageDispatcher(private val system: ExtendedActorSystem,
-                               private val provider: RemoteActorRefProvider,
-                               private val log: LoggingAdapter) extends InboundMessageDispatcher {
+private[remote] class DefaultMessageDispatcher(private val system: ExtendedActorSystem,
+                                               private val provider: RemoteActorRefProvider,
+                                               private val log: LoggingAdapter) extends InboundMessageDispatcher {
 
   private val remoteDaemon = provider.remoteDaemon
 
@@ -37,22 +38,25 @@ class DefaultMessageDispatcher(private val system: ExtendedActorSystem,
     import provider.remoteSettings._
 
     lazy val payload: AnyRef = MessageSerializer.deserialize(system, serializedMessage)
-    lazy val payloadClass: Class[_] = if (payload eq null) null else payload.getClass
+    def payloadClass: Class[_] = if (payload eq null) null else payload.getClass
     val sender: ActorRef = senderOption.getOrElse(system.deadLetters)
     val originalReceiver = recipient.path
 
-    lazy val msgLog = "RemoteMessage: " + payload + " to " + recipient + "<+{" + originalReceiver + "} from " + sender
+    def msgLog = s"RemoteMessage: [$payload] to [$recipient]<+[$originalReceiver] from [$sender]"
 
     recipient match {
 
       case `remoteDaemon` ⇒
-        if (LogReceive) log.debug("received daemon message {}", msgLog)
-        payload match {
-          case m @ (_: DaemonMsg | _: Terminated) ⇒
-            try remoteDaemon ! m catch {
-              case NonFatal(e) ⇒ log.error(e, "exception while processing remote command {} from {}", m, sender)
-            }
-          case x ⇒ log.debug("remoteDaemon received illegal message {} from {}", x, sender)
+        if (UntrustedMode) log.debug("dropping daemon message in untrusted mode")
+        else {
+          if (LogReceive) log.debug("received daemon message {}", msgLog)
+          payload match {
+            case m @ (_: DaemonMsg | _: Terminated) ⇒
+              try remoteDaemon ! m catch {
+                case NonFatal(e) ⇒ log.error(e, "exception while processing remote command {} from {}", m, sender)
+              }
+            case x ⇒ log.debug("remoteDaemon received illegal message {} from {}", x, sender)
+          }
         }
 
       case l @ (_: LocalRef | _: RepointableRef) if l.isLocal ⇒
@@ -81,8 +85,19 @@ class DefaultMessageDispatcher(private val system: ExtendedActorSystem,
 
 }
 
-object EndpointWriter {
+/**
+ * Internal API
+ */
+private[remote] object EndpointWriter {
 
+  /**
+   * This message signals that the current association maintained by the local EndpointWriter and EndpointReader is
+   * to be overridden by a new inbound association. This is needed to avoid parallel inbound associations from the
+   * same remote endpoint: when a parallel inbound association is detected, the old one is removed and the new one is
+   * used instead.
+   * @param handle Handle of the new inbound association.
+   */
+  case class TakeOver(handle: AssociationHandle)
   case object BackoffTimer
 
   sealed trait State
@@ -91,8 +106,11 @@ object EndpointWriter {
   case object Writing extends State
 }
 
-class EndpointException(msg: String, cause: Throwable) extends AkkaException(msg, cause)
-case class InvalidAssociation(localAddress: Address, remoteAddress: Address, cause: Throwable)
+private[remote] class EndpointException(msg: String, cause: Throwable) extends AkkaException(msg, cause) {
+  def this(msg: String) = this(msg, null)
+}
+
+private[remote] case class InvalidAssociation(localAddress: Address, remoteAddress: Address, cause: Throwable)
   extends EndpointException("Invalid address: " + remoteAddress, cause)
 
 private[remote] class EndpointWriter(
@@ -107,41 +125,37 @@ private[remote] class EndpointWriter(
   import context.dispatcher
 
   val extendedSystem: ExtendedActorSystem = context.system.asInstanceOf[ExtendedActorSystem]
-  var reader: ActorRef = null
-  var handle: AssociationHandle = handleOrActive.getOrElse(null)
-  var inbound = false
   val eventPublisher = new EventPublisher(context.system, log, settings.LogLifecycleEvents)
 
-  override val supervisorStrategy = OneForOneStrategy() {
-    case NonFatal(e) ⇒
-      publishAndThrow(e)
-      Stop
-  }
+  var reader: Option[ActorRef] = None
+  var handle: Option[AssociationHandle] = handleOrActive // FIXME: refactor into state data
+  val readerId = Iterator from 0
+
+  override val supervisorStrategy = OneForOneStrategy() { case NonFatal(e) ⇒ publishAndThrow(e) }
 
   val msgDispatch =
-    new DefaultMessageDispatcher(extendedSystem, extendedSystem.provider.asInstanceOf[RemoteActorRefProvider], log)
+    new DefaultMessageDispatcher(extendedSystem, RARP(extendedSystem).provider, log)
+
+  def inbound = handle.isDefined
 
   private def publishAndThrow(reason: Throwable): Nothing = {
-    eventPublisher.notifyListeners(AssociationErrorEvent(reason, localAddress, remoteAddress, inbound))
+    try
+      eventPublisher.notifyListeners(AssociationErrorEvent(reason, localAddress, remoteAddress, inbound))
+    catch { case NonFatal(e) ⇒ log.error(e, "Unable to publish error event to EventStream.") }
     throw reason
   }
 
-  private def publishAndThrow(message: String, cause: Throwable): Nothing =
-    publishAndThrow(new EndpointException(message, cause))
-
   override def postRestart(reason: Throwable): Unit = {
-    handle = null // Wipe out the possibly injected handle
+    handle = None // Wipe out the possibly injected handle
     preStart()
   }
 
   override def preStart(): Unit = {
-    if (handle eq null) {
+    if (!inbound) {
       transport.associate(remoteAddress) pipeTo self
-      inbound = false
       startWith(Initializing, ())
     } else {
       startReadEndpoint()
-      inbound = true
       startWith(Writing, ())
     }
   }
@@ -149,15 +163,16 @@ private[remote] class EndpointWriter(
   when(Initializing) {
     case Event(Send(msg, senderOption, recipient), _) ⇒
       stash()
-      stay
+      stay()
     case Event(Transport.Invalid(e), _) ⇒
-      log.error(e, "Tried to associate with invalid remote address " + remoteAddress +
-        ". Address is now quarantined, all messages to this address will be delivered to dead letters.")
+      log.error(e, "Tried to associate with invalid remote address [{}]. " +
+        "Address is now quarantined, all messages to this address will be delivered to dead letters.", remoteAddress)
       publishAndThrow(new InvalidAssociation(localAddress, remoteAddress, e))
 
-    case Event(Transport.Fail(e), _) ⇒ publishAndThrow(s"Association failed with $remoteAddress", e)
+    case Event(Transport.Fail(e), _) ⇒
+      publishAndThrow(new EndpointException(s"Association failed with [$remoteAddress]", e))
     case Event(Transport.Ready(inboundHandle), _) ⇒
-      handle = inboundHandle
+      handle = Some(inboundHandle)
       startReadEndpoint()
       goto(Writing)
 
@@ -166,80 +181,110 @@ private[remote] class EndpointWriter(
   when(Buffering) {
     case Event(Send(msg, senderOption, recipient), _) ⇒
       stash()
-      stay
+      stay()
 
     case Event(BackoffTimer, _) ⇒ goto(Writing)
   }
 
   when(Writing) {
     case Event(Send(msg, senderOption, recipient), _) ⇒
-      val pdu = codec.constructMessagePdu(recipient.localAddressToUse, recipient, serializeMessage(msg), senderOption)
-      val success = try handle.write(pdu) catch {
-        case NonFatal(e) ⇒ publishAndThrow("Failed to write message to the transport", e)
+      val pdu = codec.constructMessage(recipient.localAddressToUse, recipient, serializeMessage(msg), senderOption)
+      val success = try {
+        handle match {
+          case Some(h) ⇒ h.write(pdu)
+          case None ⇒ throw new EndpointException("Internal error: Endpoint is in state Writing, but no association" +
+            "handle is present.")
+        }
+      } catch {
+        case NonFatal(e) ⇒ publishAndThrow(new EndpointException("Failed to write message to the transport", e))
       }
-      if (success) stay else {
-        stash
+      if (success) stay() else {
+        stash()
         goto(Buffering)
       }
   }
 
   whenUnhandled {
-    case Event(Terminated(r), _) if r == reader ⇒ stop()
+    case Event(Terminated(r), _) if Some(r) == reader ⇒ publishAndThrow(new EndpointException("Disassociated"))
+    case Event(TakeOver(newHandle), _) ⇒
+      // Shutdown old reader
+      handle foreach { _.disassociate() }
+      reader match {
+        case Some(r) ⇒
+          context.unwatch(r)
+          context.stop(r)
+        case None ⇒
+      }
+      handle = Some(newHandle)
+      startReadEndpoint()
+      unstashAll()
+      goto(Writing)
   }
 
   onTransition {
     case Initializing -> Writing ⇒
       unstashAll()
       eventPublisher.notifyListeners(AssociatedEvent(localAddress, remoteAddress, inbound))
-    case Writing -> Buffering ⇒ setTimer("backoff-timer", BackoffTimer, settings.BackoffPeriod, false)
+    case Writing -> Buffering ⇒
+      setTimer("backoff-timer", BackoffTimer, settings.BackoffPeriod, repeat = false)
     case Buffering -> Writing ⇒
       unstashAll()
       cancelTimer("backoff-timer")
   }
 
   onTermination {
-    case StopEvent(_, _, _) ⇒ if (handle ne null) {
-      handle.disassociate()
+    case StopEvent(_, _, _) ⇒
+      // FIXME: Add a test case for this
+      // It is important to call unstashAll() for the stash to work properly and maintain messages during restart.
+      // As the FSM trait does not call super.postStop(), this call is needed
+      unstashAll()
+      handle foreach { _.disassociate() }
       eventPublisher.notifyListeners(DisassociatedEvent(localAddress, remoteAddress, inbound))
-    }
   }
 
-  private def startReadEndpoint(): Unit = {
-    reader = context.actorOf(Props(new EndpointReader(codec, msgDispatch)),
-      "endpointReader-" + URLEncoder.encode(remoteAddress.toString, "utf-8"))
-    handle.readHandlerPromise.success(reader)
-    context.watch(reader)
+  private def startReadEndpoint(): Unit = handle match {
+    case Some(h) ⇒
+      val readerLocalAddress = h.localAddress
+      val readerCodec = codec
+      val readerDispatcher = msgDispatch
+      reader = Some(
+        context.watch(context.actorOf(Props(new EndpointReader(readerCodec, readerLocalAddress, readerDispatcher)),
+          "endpointReader-" + AddressUrlEncoder(remoteAddress) + "-" + readerId.next())))
+      h.readHandlerPromise.success(ActorHandleEventListener(reader.get))
+    case None ⇒ throw new EndpointException("Internal error: No handle was present during creation of the endpoint" +
+      "reader.")
   }
 
-  private def serializeMessage(msg: Any): MessageProtocol = {
-    Serialization.currentTransportAddress.withValue(handle.localAddress) {
-      (MessageSerializer.serialize(extendedSystem, msg.asInstanceOf[AnyRef]))
-    }
+  private def serializeMessage(msg: Any): MessageProtocol = handle match {
+    // FIXME: Unserializable messages should be dropped without closing the association. Should be logged,
+    // but without flooding the log.
+    case Some(h) ⇒
+      Serialization.currentTransportAddress.withValue(h.localAddress) {
+        (MessageSerializer.serialize(extendedSystem, msg.asInstanceOf[AnyRef]))
+      }
+    case None ⇒ throw new EndpointException("Internal error: No handle was present during serialization of" +
+      "outbound message.")
   }
 
 }
 
 private[remote] class EndpointReader(
   val codec: AkkaPduCodec,
+  val localAddress: Address,
   val msgDispatch: InboundMessageDispatcher) extends Actor {
 
-  val provider = context.system.asInstanceOf[ExtendedActorSystem].provider.asInstanceOf[RemoteActorRefProvider]
+  val provider = RARP(context.system).provider
 
   override def receive: Receive = {
     case Disassociated ⇒ context.stop(self)
 
-    // FIXME: Do 2 step deserialization (old-remoting must be removed first)
-    case InboundPayload(p) ⇒ decodePdu(p) match {
-
-      case Message(recipient, recipientAddress, serializedMessage, senderOption) ⇒
-        msgDispatch.dispatch(recipient, recipientAddress, serializedMessage, senderOption)
-
-      case _ ⇒
-    }
+    case InboundPayload(p) ⇒
+      val msg = decodePdu(p)
+      msgDispatch.dispatch(msg.recipient, msg.recipientAddress, msg.serializedMessage, msg.senderOption)
   }
 
-  private def decodePdu(pdu: ByteString): AkkaPdu = try {
-    codec.decodePdu(pdu, provider)
+  private def decodePdu(pdu: ByteString): Message = try {
+    codec.decodeMessage(pdu, provider, localAddress)
   } catch {
     case NonFatal(e) ⇒ throw new EndpointException("Error while decoding incoming Akka PDU", e)
   }

@@ -12,6 +12,7 @@ import akka.serialization.Serialization
 import akka.remote.RemoteProtocol._
 import akka.actor._
 import scala.collection.immutable
+import scala.concurrent.Future
 
 /**
  * Remote life-cycle events.
@@ -172,12 +173,18 @@ abstract class RemoteTransport(val system: ExtendedActorSystem, val provider: Re
   /**
    * Shuts down the remoting
    */
-  def shutdown(): Unit
+  def shutdown(): Future[Unit]
 
   /**
    * Address to be used in RootActorPath of refs generated for this transport.
    */
   def addresses: immutable.Set[Address]
+
+  /**
+   * The default transport address of the actorsystem
+   * @return The listen address of the default transport
+   */
+  def defaultAddress: Address
 
   /**
    * Resolves the correct local address to be used for contacting the given remote address
@@ -215,6 +222,14 @@ abstract class RemoteTransport(val system: ExtendedActorSystem, val provider: Re
   }
 
   /**
+   * Sends a management command to the underlying transport stack. The call returns with a Future that indicates
+   * if the command was handled successfully or dropped.
+   * @param cmd Command message to send to the transports.
+   * @return A Future that indicates when the message was successfully handled or dropped.
+   */
+  def managementCommand(cmd: Any): Future[Boolean] = { Future.successful(false) }
+
+  /**
    * A Logger that can be used to log issues that may occur
    */
   def log: LoggingAdapter
@@ -233,7 +248,7 @@ abstract class RemoteTransport(val system: ExtendedActorSystem, val provider: Re
    * Returns a newly created AkkaRemoteProtocol with the given message payload.
    */
   def createMessageSendEnvelope(rmp: RemoteMessageProtocol): AkkaRemoteProtocol =
-    AkkaRemoteProtocol.newBuilder.setMessage(rmp).build
+    AkkaRemoteProtocol.newBuilder.setPayload(rmp.toByteString).build
 
   /**
    * Returns a newly created AkkaRemoteProtocol with the given control payload.
@@ -245,7 +260,7 @@ abstract class RemoteTransport(val system: ExtendedActorSystem, val provider: Re
    * Serializes the ActorRef instance into a Protocol Buffers (protobuf) Message.
    */
   def toRemoteActorRefProtocol(actor: ActorRef): ActorRefProtocol =
-    ActorRefProtocol.newBuilder.setPath(actor.path.toStringWithAddress(addresses.head)).build
+    ActorRefProtocol.newBuilder.setPath(actor.path.toStringWithAddress(defaultAddress)).build
 
   /**
    * Returns a new RemoteMessageProtocol containing the serialized representation of the given parameters.
@@ -254,7 +269,7 @@ abstract class RemoteTransport(val system: ExtendedActorSystem, val provider: Re
     val messageBuilder = RemoteMessageProtocol.newBuilder.setRecipient(toRemoteActorRefProtocol(recipient))
     if (senderOption.isDefined) messageBuilder.setSender(toRemoteActorRefProtocol(senderOption.get))
 
-    Serialization.currentTransportAddress.withValue(addresses.head) {
+    Serialization.currentTransportAddress.withValue(defaultAddress) {
       messageBuilder.setMessage(MessageSerializer.serialize(system, message.asInstanceOf[AnyRef]))
     }
 

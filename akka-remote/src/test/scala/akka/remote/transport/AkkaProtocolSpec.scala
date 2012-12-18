@@ -3,7 +3,7 @@ package akka.remote.transport
 import akka.actor.{ ExtendedActorSystem, Address, Props }
 import akka.remote.transport.AkkaPduCodec.{ Disassociate, Associate, Heartbeat }
 import akka.remote.transport.AkkaProtocolSpec.TestFailureDetector
-import akka.remote.transport.AssociationHandle.{ Disassociated, InboundPayload }
+import akka.remote.transport.AssociationHandle.{ ActorHandleEventListener, Disassociated, InboundPayload }
 import akka.remote.transport.TestTransport._
 import akka.remote.transport.Transport._
 import akka.remote.{ RemoteProtocol, RemoteActorRefProvider, FailureDetector }
@@ -31,34 +31,34 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
 
   val conf = ConfigFactory.parseString(
     """
-      |  akka.remoting {
-      |
-      |    failure-detector {
-      |      threshold = 7.0
-      |      max-sample-size = 100
-      |      min-std-deviation = 100 ms
-      |      acceptable-heartbeat-pause = 3 s
-      |    }
-      |
-      |    heartbeat-interval = 0.1 s
-      |
-      |    wait-activity-enabled = on
-      |
-      |    backoff-interval = 1 s
-      |
-      |    require-cookie = off
-      |
-      |    secure-cookie = "abcde"
-      |
-      |    shutdown-timeout = 5 s
-      |
-      |    startup-timeout = 5 s
-      |
-      |    retry-latch-closed-for = 0 s
-      |
-      |    use-passive-connections = on
-      |  }
-    """.stripMargin)
+      akka.remoting {
+
+        failure-detector {
+          threshold = 7.0
+          max-sample-size = 100
+          min-std-deviation = 100 ms
+          acceptable-heartbeat-pause = 3 s
+        }
+
+       heartbeat-interval = 0.1 s
+
+        wait-activity-enabled = on
+
+        backoff-interval = 1 s
+
+        require-cookie = off
+
+        secure-cookie = "abcde"
+
+        shutdown-timeout = 5 s
+
+        startup-timeout = 5 s
+
+        retry-latch-closed-for = 0 s
+
+        use-passive-connections = on
+      }
+  """)
 
   val localAddress = Address("test", "testsystem", "testhost", 1234)
   val localAkkaAddress = Address("test.akka", "testsystem", "testhost", 1234)
@@ -68,10 +68,9 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
 
   val codec = AkkaPduProtobufCodec
 
-  val provider = system.asInstanceOf[ExtendedActorSystem].provider.asInstanceOf[RemoteActorRefProvider]
-
   val testMsg = RemoteProtocol.MessageProtocol.newBuilder().setSerializerId(0).setMessage(PByteString.copyFromUtf8("foo")).build
-  val testMsgPdu: ByteString = codec.constructMessagePdu(localAkkaAddress, self, testMsg, None)
+  val testEnvelope = codec.constructMessage(localAkkaAddress, testActor, testMsg, None)
+  val testMsgPdu: ByteString = codec.constructPayload(testEnvelope)
 
   def testHeartbeat = InboundPayload(codec.constructHeartbeat)
   def testPayload = InboundPayload(testMsgPdu)
@@ -91,7 +90,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
 
   def lastActivityIsHeartbeat(registry: AssociationRegistry) = if (registry.logSnapshot.isEmpty) false else registry.logSnapshot.last match {
     case WriteAttempt(sender, recipient, payload) if sender == localAddress && recipient == remoteAddress ⇒
-      codec.decodePdu(payload, provider) match {
+      codec.decodePdu(payload) match {
         case Heartbeat ⇒ true
         case _         ⇒ false
       }
@@ -100,7 +99,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
 
   def lastActivityIsAssociate(registry: AssociationRegistry, cookie: Option[String]) = if (registry.logSnapshot.isEmpty) false else registry.logSnapshot.last match {
     case WriteAttempt(sender, recipient, payload) if sender == localAddress && recipient == remoteAddress ⇒
-      codec.decodePdu(payload, provider) match {
+      codec.decodePdu(payload) match {
         case Associate(c, origin) if c == cookie && origin == localAddress ⇒ true
         case _ ⇒ false
       }
@@ -109,7 +108,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
 
   def lastActivityIsDisassociate(registry: AssociationRegistry) = if (registry.logSnapshot.isEmpty) false else registry.logSnapshot.last match {
     case WriteAttempt(sender, recipient, payload) if sender == localAddress && recipient == remoteAddress ⇒
-      codec.decodePdu(payload, provider) match {
+      codec.decodePdu(payload) match {
         case Disassociate ⇒ true
         case _            ⇒ false
       }
@@ -124,7 +123,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
       system.actorOf(Props(new ProtocolStateActor(
         localAddress,
         handle,
-        self,
+        ActorAssociationEventListener(testActor),
         new AkkaProtocolSettings(conf),
         codec,
         failureDetector)))
@@ -138,7 +137,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
       val reader = system.actorOf(Props(new ProtocolStateActor(
         localAddress,
         handle,
-        self,
+        ActorAssociationEventListener(testActor),
         new AkkaProtocolSettings(conf),
         codec,
         failureDetector)))
@@ -151,7 +150,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
         case InboundAssociation(h) ⇒ h
       }
 
-      wrappedHandle.readHandlerPromise.success(self)
+      wrappedHandle.readHandlerPromise.success(ActorHandleEventListener(testActor))
 
       failureDetector.called must be(true)
 
@@ -161,7 +160,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
       reader ! testPayload
 
       expectMsgPF() {
-        case InboundPayload(p) ⇒ p must be === testMsgPdu
+        case InboundPayload(p) ⇒ p must be === testEnvelope
       }
     }
 
@@ -171,7 +170,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
       val reader = system.actorOf(Props(new ProtocolStateActor(
         localAddress,
         handle,
-        self,
+        ActorAssociationEventListener(testActor),
         new AkkaProtocolSettings(conf),
         codec,
         failureDetector)))
@@ -258,7 +257,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
       val reader = system.actorOf(Props(new ProtocolStateActor(
         localAddress,
         handle,
-        self,
+        ActorAssociationEventListener(testActor),
         new AkkaProtocolSettings(ConfigFactory.parseString("akka.remoting.require-cookie = on").withFallback(conf)),
         codec,
         failureDetector)))
@@ -277,7 +276,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
       val reader = system.actorOf(Props(new ProtocolStateActor(
         localAddress,
         handle,
-        self,
+        ActorAssociationEventListener(testActor),
         new AkkaProtocolSettings(ConfigFactory.parseString("akka.remoting.require-cookie = on").withFallback(conf)),
         codec,
         failureDetector)))
@@ -289,7 +288,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
         case InboundAssociation(h) ⇒ h
       }
 
-      wrappedHandle.readHandlerPromise.success(self)
+      wrappedHandle.readHandlerPromise.success(ActorHandleEventListener(testActor))
 
       failureDetector.called must be(true)
 
@@ -310,9 +309,9 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
         transport,
         new AkkaProtocolSettings(ConfigFactory.parseString(
           """
-            | akka.remoting.require-cookie = on
-            | akka.remoting.wait-activity-enabled = off
-          """.stripMargin).withFallback(conf)),
+             akka.remoting.require-cookie = on
+             akka.remoting.wait-activity-enabled = off
+          """).withFallback(conf)),
         codec,
         failureDetector)))
 
@@ -351,7 +350,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
         case _ ⇒ fail()
       }
 
-      wrappedHandle.readHandlerPromise.success(self)
+      wrappedHandle.readHandlerPromise.success(ActorHandleEventListener(testActor))
 
       lastActivityIsAssociate(registry, None) must be(true)
 
@@ -389,9 +388,9 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
         case _ ⇒ fail()
       }
 
-      wrappedHandle.readHandlerPromise.success(self)
+      wrappedHandle.readHandlerPromise.success(ActorHandleEventListener(testActor))
 
-      Thread.sleep(100)
+      Thread.sleep(100) //FIXME: Remove this
 
       reader ! Disassociated
 
@@ -422,7 +421,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
         case _ ⇒ fail()
       }
 
-      wrappedHandle.readHandlerPromise.success(self)
+      wrappedHandle.readHandlerPromise.success(ActorHandleEventListener(testActor))
 
       lastActivityIsAssociate(registry, None) must be(true)
 
@@ -460,7 +459,7 @@ class AkkaProtocolSpec extends AkkaSpec("""akka.actor.provider = "akka.remote.Re
 
       stateActor ! Disassociated
 
-      wrappedHandle.readHandlerPromise.success(self)
+      wrappedHandle.readHandlerPromise.success(ActorHandleEventListener(testActor))
 
       expectMsg(Disassociated)
 

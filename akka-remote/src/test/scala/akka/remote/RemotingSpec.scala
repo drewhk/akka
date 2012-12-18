@@ -34,19 +34,6 @@ object RemotingSpec {
   }
 
   val cfg: Config = ConfigFactory parseString ("""
-    common-transport-settings {
-      log-transport-events = true
-      connection-timeout = 120s
-      use-dispatcher-for-io = ""
-      write-buffer-high-water-mark = 0b
-      write-buffer-low-water-mark = 0b
-      send-buffer-size = 32000b
-      receive-buffer-size = 32000b
-      backlog = 4096
-      hostname = localhost
-      enable-ssl = false
-    }
-
     common-ssl-settings {
       key-store = "%s"
       trust-store = "%s"
@@ -64,44 +51,21 @@ object RemotingSpec {
 
       remoting.retry-latch-closed-for = 1 s
       remoting.log-remote-lifecycle-events = on
+      remoting.enabled-transports = [test, tcp, udp, ssl]
 
-      remoting.transports = [
-        {
+      remoting.transports.tcp.port = 12345
+      remoting.transports.udp.port = 12345
+      remoting.transports.ssl.port = 23456
+      remoting.transports.ssl.ssl = ${common-ssl-settings}
+
+      remoting.transports.test {
           transport-class = "akka.remote.transport.TestTransport"
-          settings {
-            registry-key = aX33k0jWKg
-            local-address = "test://RemotingSpec@localhost:12345"
-            maximum-payload-bytes = 32000 bytes
-            scheme-identifier = test
-          }
-        },
-        {
-          transport-class = "akka.remote.transport.netty.NettyTransport"
-          settings = ${common-transport-settings}
-          settings {
-            transport-protocol = tcp
-            port = 12345
-          }
-        },
-        {
-          transport-class = "akka.remote.transport.netty.NettyTransport"
-          settings = ${common-transport-settings}
-          settings {
-            transport-protocol = udp
-            port = 12345
-          }
-        },
-        {
-          transport-class = "akka.remote.transport.netty.NettyTransport"
-          settings = ${common-transport-settings}
-          settings {
-            transport-protocol = tcp
-            enable-ssl = true
-            port = 23456
-            ssl = ${common-ssl-settings}
-          }
-        }
-      ]
+          applied-adapters = []
+          registry-key = aX33k0jWKg
+          local-address = "test://RemotingSpec@localhost:12345"
+          maximum-payload-bytes = 32000 bytes
+          scheme-identifier = test
+      }
 
       actor.deployment {
         /blub.remote = "test.akka://remote-sys@localhost:12346"
@@ -125,44 +89,12 @@ class RemotingSpec extends AkkaSpec(RemotingSpec.cfg) with ImplicitSender with D
 
   val conf = ConfigFactory.parseString(
     """
-       akka.remote.netty.port=12346
-       akka.remoting.transports = [
-         {
-           transport-class = "akka.remote.transport.TestTransport"
-           settings {
-             registry-key = aX33k0jWKg
-             local-address = "test://remote-sys@localhost:12346"
-             maximum-payload-bytes = 32000 bytes
-             scheme-identifier = test
-           }
-         },
-         {
-           transport-class = "akka.remote.transport.netty.NettyTransport"
-           settings = ${common-transport-settings}
-           settings {
-             transport-protocol = tcp
-             port = 12346
-           }
-         },
-         {
-           transport-class = "akka.remote.transport.netty.NettyTransport"
-           settings = ${common-transport-settings}
-           settings {
-             transport-protocol = udp
-             port = 12346
-           }
-         },
-         {
-           transport-class = "akka.remote.transport.netty.NettyTransport"
-           settings = ${common-transport-settings}
-           settings {
-             transport-protocol = tcp
-             enable-ssl = true
-             port = 23457
-             ssl = ${common-ssl-settings}
-           }
-         }
-      ]
+      akka.remoting.transports {
+        tcp.port = 12346
+        udp.port = 12346
+        ssl.port = 23457
+        test.local-address = "test://remote-sys@localhost:12346"
+      }
     """).withFallback(system.settings.config).resolve()
   val other = ActorSystem("remote-sys", conf)
 
@@ -183,14 +115,12 @@ class RemotingSpec extends AkkaSpec(RemotingSpec.cfg) with ImplicitSender with D
 
     "support remote look-ups" in {
       here ! "ping"
-      expectMsgPF() {
-        case ("pong", s: AnyRef) if s eq testActor ⇒ true
-      }
+      expectMsg(("pong", testActor))
     }
 
     "send error message for wrong address" in {
-      EventFilter.error(start = "AssociationError", occurrences = 1).intercept {
-        system.actorFor("test.akka://remotesys@localhost:12346/user/echo") ! "ping"
+      EventFilter.error(start = "AssociationError").intercept {
+        system.actorFor("test.akka://nonexistingsystem@localhost:12346/user/echo") ! "ping"
       }
     }
 

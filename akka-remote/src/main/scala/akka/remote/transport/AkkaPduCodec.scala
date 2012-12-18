@@ -7,35 +7,69 @@ import akka.remote.transport.AkkaPduCodec._
 import akka.remote.{ RemoteActorRefProvider, RemoteProtocol }
 import akka.util.ByteString
 import com.google.protobuf.InvalidProtocolBufferException
+import com.google.protobuf.{ ByteString ⇒ PByteString }
 
 class PduCodecException(msg: String, cause: Throwable) extends AkkaException(msg, cause)
 
+/**
+ * Internal API
+ *
+ * Companion object of the [[akka.remote.transport.AkkaPduCodec]] trait. Contains the representation case classes
+ * of decoded Akka Protocol Data Units (PDUs).
+ */
 private[remote] object AkkaPduCodec {
 
   /**
-   * Trait that represents decoded Akka PDUs
+   * Trait that represents decoded Akka PDUs (Protocol Data Units)
    */
   sealed trait AkkaPdu
 
   case class Associate(cookie: Option[String], origin: Address) extends AkkaPdu
   case object Disassociate extends AkkaPdu
   case object Heartbeat extends AkkaPdu
+  case class Payload(bytes: ByteString) extends AkkaPdu
+
   case class Message(recipient: InternalActorRef,
                      recipientAddress: Address,
                      serializedMessage: MessageProtocol,
-                     sender: Option[ActorRef]) extends AkkaPdu
+                     senderOption: Option[ActorRef])
 }
 
 /**
- * A Codec that is able to convert Akka PDUs from and to [[akka.util.ByteString]]s.
+ * A Codec that is able to convert Akka PDUs (Protocol Data Units) from and to [[akka.util.ByteString]]s.
  */
 private[remote] trait AkkaPduCodec {
 
-  def constructMessagePdu(
-    localAddress: Address,
-    recipient: ActorRef,
-    serializedMessage: MessageProtocol,
-    senderOption: Option[ActorRef]): ByteString
+  /**
+   * Returns an [[akka.remote.transport.AkkaPduCodec.AkkaPdu]] instance that represents the PDU contained in the raw
+   * ByteString.
+   * @param raw
+   *   Encoded raw byte representation of an Akka PDU
+   * @return
+   *   Case class representation of the decoded PDU that can be used in a match statement
+   */
+  def decodePdu(raw: ByteString): AkkaPdu
+
+  /**
+   * Takes an [[akka.remote.transport.AkkaPduCodec.AkkaPdu]] representation of an Akka PDU and returns its encoded
+   * form as a [[akka.util.ByteString]].
+   *
+   * For the same effect the constructXXX methods might be called directly, taking method parameters instead of the
+   * [[akka.remote.transport.AkkaPduCodec.AkkaPdu]] case classes.
+   *
+   * @param pdu
+   *   The Akka Protocol Data Unit to be encoded
+   * @return
+   *   Encoded form as raw bytes
+   */
+  def encodePdu(pdu: AkkaPdu): ByteString = pdu match {
+    case Associate(cookie, origin) ⇒ constructAssociate(cookie, origin)
+    case Payload(bytes)            ⇒ constructPayload(bytes)
+    case Disassociate              ⇒ constructDisassociate
+    case Heartbeat                 ⇒ constructHeartbeat
+  }
+
+  def constructPayload(payload: ByteString): ByteString
 
   def constructAssociate(cookie: Option[String], origin: Address): ByteString
 
@@ -43,13 +77,18 @@ private[remote] trait AkkaPduCodec {
 
   def constructHeartbeat: ByteString
 
-  def decodePdu(raw: ByteString, provider: RemoteActorRefProvider): AkkaPdu // Effective enough?
+  def decodeMessage(raw: ByteString, provider: RemoteActorRefProvider, localAddress: Address): Message
 
+  def constructMessage(
+    localAddress: Address,
+    recipient: ActorRef,
+    serializedMessage: MessageProtocol,
+    senderOption: Option[ActorRef]): ByteString
 }
 
 private[remote] object AkkaPduProtobufCodec extends AkkaPduCodec {
 
-  override def constructMessagePdu(
+  override def constructMessage(
     localAddress: Address,
     recipient: ActorRef,
     serializedMessage: MessageProtocol,
@@ -61,8 +100,11 @@ private[remote] object AkkaPduProtobufCodec extends AkkaPduCodec {
     senderOption foreach { ref ⇒ messageBuilder.setSender(serializeActorRef(localAddress, ref)) }
     messageBuilder.setMessage(serializedMessage)
 
-    akkaRemoteProtocolToByteString(AkkaRemoteProtocol.newBuilder().setMessage(messageBuilder.build).build)
+    ByteString(messageBuilder.build.toByteArray)
   }
+
+  override def constructPayload(payload: ByteString): ByteString =
+    ByteString(AkkaRemoteProtocol.newBuilder().setPayload(PByteString.copyFrom(payload.asByteBuffer)).build.toByteArray)
 
   override def constructAssociate(cookie: Option[String], origin: Address): ByteString =
     constructControlMessagePdu(RemoteProtocol.CommandType.CONNECT, cookie, Some(origin))
@@ -73,28 +115,28 @@ private[remote] object AkkaPduProtobufCodec extends AkkaPduCodec {
   override val constructHeartbeat: ByteString =
     constructControlMessagePdu(RemoteProtocol.CommandType.HEARTBEAT, None, None)
 
-  override def decodePdu(raw: ByteString, provider: RemoteActorRefProvider): AkkaPdu = {
+  override def decodePdu(raw: ByteString): AkkaPdu = {
     try {
       val pdu = AkkaRemoteProtocol.parseFrom(raw.toArray)
-
-      if (pdu.hasMessage) {
-        decodeMessage(pdu.getMessage, provider)
-      } else if (pdu.hasInstruction) {
-        decodeControlPdu(pdu.getInstruction)
-      } else {
-        throw new PduCodecException("Error decoding Akka PDU: Neither message nor control message were contained", null)
-      }
+      if (pdu.hasPayload) Payload(ByteString(pdu.getPayload.asReadOnlyByteBuffer()))
+      else if (pdu.hasInstruction) decodeControlPdu(pdu.getInstruction)
+      else throw new PduCodecException("Error decoding Akka PDU: Neither message nor control message were contained", null)
     } catch {
       case e: InvalidProtocolBufferException ⇒ throw new PduCodecException("Decoding PDU failed.", e)
     }
   }
 
-  private def decodeMessage(msgPdu: RemoteMessageProtocol, provider: RemoteActorRefProvider): Message = {
+  override def decodeMessage(
+    raw: ByteString,
+    provider: RemoteActorRefProvider,
+    localAddress: Address): Message = {
+    val msgPdu = RemoteMessageProtocol.parseFrom(raw.toArray)
     Message(
-      recipient = provider.actorFor(provider.rootGuardian, msgPdu.getRecipient.getPath),
+      recipient = provider.actorForWithLocalAddress(provider.rootGuardian, msgPdu.getRecipient.getPath, localAddress),
       recipientAddress = AddressFromURIString(msgPdu.getRecipient.getPath),
       serializedMessage = msgPdu.getMessage,
-      sender = if (msgPdu.hasSender) Some(provider.actorFor(provider.rootGuardian, msgPdu.getSender.getPath)) else None)
+      senderOption = if (!msgPdu.hasSender) None
+      else Some(provider.actorForWithLocalAddress(provider.rootGuardian, msgPdu.getSender.getPath, localAddress)))
   }
 
   private def decodeControlPdu(controlPdu: RemoteControlProtocol): AkkaPdu = {
@@ -119,22 +161,16 @@ private[remote] object AkkaPduProtobufCodec extends AkkaPduCodec {
     val controlMessageBuilder = RemoteControlProtocol.newBuilder()
 
     controlMessageBuilder.setCommandType(code)
-    cookie foreach { controlMessageBuilder.setCookie(_) }
+    cookie foreach controlMessageBuilder.setCookie
     for (originAddress ← origin; serialized ← serializeAddress(originAddress))
       controlMessageBuilder.setOrigin(serialized)
 
-    akkaRemoteProtocolToByteString(AkkaRemoteProtocol.newBuilder().setInstruction(controlMessageBuilder.build).build)
+    ByteString(AkkaRemoteProtocol.newBuilder().setInstruction(controlMessageBuilder.build).build.toByteArray)
   }
 
-  private def akkaRemoteProtocolToByteString(pdu: AkkaRemoteProtocol): ByteString = ByteString(pdu.toByteArray)
-
   private def serializeActorRef(defaultAddress: Address, ref: ActorRef): ActorRefProtocol = {
-    val fullActorRefString: String = if (ref.path.address.host.isDefined)
-      ref.path.toString
-    else
-      ref.path.toStringWithAddress(defaultAddress)
-
-    ActorRefProtocol.newBuilder.setPath(fullActorRefString).build()
+    ActorRefProtocol.newBuilder.setPath(
+      if (ref.path.address.host.isDefined) ref.path.toString else ref.path.toStringWithAddress(defaultAddress)).build()
   }
 
   private def serializeAddress(address: Address): Option[AddressProtocol] = {
