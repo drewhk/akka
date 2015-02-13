@@ -1,0 +1,27 @@
+/**
+ * Copyright (C) 2014-2015 Typesafe Inc. <http://www.typesafe.com>
+ */
+package akka.stream.impl
+
+import scala.collection.immutable
+import akka.actor.Props
+import akka.stream.MaterializerSettings
+import akka.stream.impl.GenJunctions._
+import akka.stream.scaladsl.FlowGraph.FlowGraphBuilder
+import akka.stream.scaladsl.Graphs.{ InPort, OutPort, Ports }
+
+[2..19#/** INTERNAL API */
+private[akka] final class Zip1With(_settings: MaterializerSettings, f: Function1[[#Any#], Any])
+  extends FanIn(_settings, inputPorts = 1) {
+
+  inputBunch.markAllInputs()
+
+  nextPhase(TransferPhase(inputBunch.AllOfMarkedInputs && primaryOutputs.NeedsDemand) { () ⇒
+    val elem##0 = inputBunch.dequeue(##0)
+    [2..#val elem0 = inputBunch.dequeue(0)#
+    ]
+
+    primaryOutputs.enqueueOutputElement(f([#elem0#]))
+  })
+}#
+]
