@@ -10,7 +10,12 @@ import akka.stream.impl.GenJunctions._
 import akka.stream.scaladsl.FlowGraph.FlowGraphBuilder
 import akka.stream.scaladsl.Graphs.{ InPort, OutPort, Ports }
 
-[2..19#object ZipWith1 {
+[2..19#/**
+ * Combine the elements of 1 streams into a stream of the combined elements.
+ *
+ * A `ZipWith1` has 1 `in` ports and 1 `out` port.
+ */
+object ZipWith1 {
 
   final case class ZipWith1Ports[[#A1#], O](
     [#in1: InPort[A1], #
@@ -24,6 +29,12 @@ import akka.stream.scaladsl.Graphs.{ InPort, OutPort, Ports }
         ]new OutPort(out.toString))
   }
 
+  /**
+   * Create a `ZipWith1` that takes 1 arguments and a zipper
+   * function that combines the arguments.
+   *
+   * @param zipper function that combines the other 1 arguments
+   */
   def apply[[#A1#], O](zipper: ([#A1#]) ⇒ O)(implicit b: FlowGraphBuilder): ZipWith1Ports[[#A1#], O] = {
     val zipWithModule = new ZipWith1Module(
       [#new InPort[A1]("ZipWith1.in1"),#
@@ -33,4 +44,5 @@ import akka.stream.scaladsl.Graphs.{ InPort, OutPort, Ports }
     ZipWith1Ports([#zipWithModule.in1#], zipWithModule.out)
   }
 }#
+
 ]

@@ -10,10 +10,15 @@ import akka.stream.impl._
 import akka.stream.impl.StreamLayout._
 import akka.stream.scaladsl.FlowGraph.FlowGraphBuilder
 import akka.stream.scaladsl.Graphs.{ InPort, OutPort }
-import OperationAttributes.name
 
 import scala.collection.immutable
 
+/**
+ * Merge several streams, taking elements as they arrive from input streams
+ * (picking randomly when several have elements ready).
+ *
+ * A `Merge` has one `out` port and one or more `in` ports.
+ */
 object Merge {
 
   final case class MergePorts[T](in: Vector[InPort[T]], out: OutPort[T]) extends Graphs.Ports {
@@ -23,7 +28,14 @@ object Merge {
     override def deepCopy(): MergePorts[T] = MergePorts(in.map(i ⇒ new InPort[T](i.toString)), new OutPort(out.toString))
   }
 
+  /**
+   * Create a new `Merge` with the specified number of input ports and attributes.
+   *
+   * @param inputPorts number of input ports
+   * @param attributes optional attributes
+   */
   def apply[T](inputPorts: Int, attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): MergePorts[T] = {
+    require(inputPorts >= 1, s"A Merge must have 1 or more input ports [$inputPorts]")
     val mergeModule = new MergeModule(
       Vector.fill(inputPorts)(new InPort[T]("Merge.in")),
       new OutPort[T]("Merge.out"),
@@ -34,6 +46,12 @@ object Merge {
 
 }
 
+/**
+ * Merge several streams, taking elements as they arrive from input streams
+ * (picking from preferred when several have elements ready).
+ *
+ * A `MergePreferred` has one `out` port, one `preferred` input port and 0 or more secondary `in` ports.
+ */
 object MergePreferred {
   final case class MergePreferredPorts[T](preferred: InPort[T], in: Vector[InPort[T]], out: OutPort[T]) extends Graphs.Ports {
     override val inlets: immutable.Seq[InPort[_]] = in :+ preferred
@@ -43,7 +61,14 @@ object MergePreferred {
       MergePreferredPorts(new InPort(preferred.toString), in.map(i ⇒ new InPort[T](i.toString)), new OutPort(out.toString))
   }
 
+  /**
+   * Create a new `PreferredMerge` with the specified number of secondary input ports and attributes.
+   *
+   * @param secondaryPorts number of secondary input ports
+   * @param attributes optional attributes
+   */
   def apply[T](secondaryPorts: Int, attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): MergePreferredPorts[T] = {
+    require(secondaryPorts >= 0, s"A MergePreferred must have 0 or more secondary input ports [$secondaryPorts]")
     val mergeModule = new MergePreferredModule(
       new InPort[T]("Preferred.preferred"),
       Vector.fill(secondaryPorts)(new InPort[T]("Preferred.in")),
@@ -54,6 +79,13 @@ object MergePreferred {
   }
 }
 
+/**
+ * Fan-out the stream to several streams. Each element is produced to
+ * the other streams. It will not shut down until the subscriptions
+ * for at least two downstream subscribers have been established.
+ *
+ * A `Broadcast` has one `in` port and 2 or more `out` ports.
+ */
 object Broadcast {
 
   final case class BroadcastPorts[T](in: InPort[T], out: Vector[OutPort[T]]) extends Graphs.Ports {
@@ -64,7 +96,14 @@ object Broadcast {
       BroadcastPorts(new InPort(in.toString), out.map(o ⇒ new OutPort[T](o.toString)))
   }
 
+  /**
+   * Create a new `Broadcast` with the specified number of output ports and attributes.
+   *
+   * @param outputPorts number of output ports
+   * @param attributes optional attributes
+   */
   def apply[T](outputPorts: Int, attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): BroadcastPorts[T] = {
+    require(outputPorts >= 2, s"A Broadcast must have 2 or more output ports [$outputPorts]")
     val bcastModule = new BroadcastModule(
       new InPort[T]("Bcast.in"),
       Vector.fill(outputPorts)(new OutPort[T]("Bcast.out")),
@@ -74,6 +113,13 @@ object Broadcast {
   }
 }
 
+/**
+ * Fan-out the stream to several streams. Each element is produced to
+ * one of the other streams. It will not shut down until the subscriptions
+ * for at least two downstream subscribers have been established.
+ *
+ * A `Balance` has one `in` port and 2 or more `out` ports.
+ */
 object Balance {
 
   final case class BalancePorts[T](in: InPort[T], out: Vector[OutPort[T]]) extends Graphs.Ports {
@@ -84,10 +130,20 @@ object Balance {
       BalancePorts(new InPort(in.toString), out.map(o ⇒ new OutPort[T](o.toString)))
   }
 
+  /**
+   * Create a new `Balance` with the specified number of output ports and attributes.
+   *
+   * @param outputPorts number of output ports
+   * @param waitForAllDownstreams if you use `waitForAllDownstreams = true` it will not start emitting
+   *   elements to downstream outputs until all of them have requested at least one element,
+   *   default value is `false`
+   * @param attributes optional attributes
+   */
   def apply[T](
     outputPorts: Int,
     waitForAllDownstreams: Boolean = false,
     attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): BalancePorts[T] = {
+    require(outputPorts >= 2, s"A Balance must have 2 or more output ports [$outputPorts]")
     val bcastModule = new BalanceModule(
       new InPort[T]("Balance.in"),
       Vector.fill(outputPorts)(new OutPort[T]("Balance.out")),
@@ -96,9 +152,13 @@ object Balance {
     b.addModule(bcastModule)
     BalancePorts(bcastModule.in, bcastModule.outs)
   }
-
 }
 
+/**
+ * Combine the elements of 2 streams into a stream of tuples.
+ *
+ * A `Zip` has a `left` and a `right` input port and one `out` port
+ */
 object Zip {
 
   final case class ZipPorts[A, B](left: InPort[A], right: InPort[B], out: OutPort[(A, B)]) extends Graphs.Ports {
@@ -109,6 +169,11 @@ object Zip {
       ZipPorts(new InPort(left.toString), new InPort(right.toString), new OutPort(out.toString))
   }
 
+  /**
+   * Create a new `Zip` with the specified attributes.
+   *
+   * @param attributes optional attributes
+   */
   def apply[A, B](attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): ZipPorts[A, B] = {
     val zipWithModule = new ZipWith2Module(
       new InPort[A]("Zip.left"),
@@ -122,8 +187,16 @@ object Zip {
 
 }
 
+/**
+ * Combine the elements of multiple streams into a stream of the combined elements.
+ */
 object ZipWith extends ZipWithApply
 
+/**
+ * Takes a stream of pair elements and splits each pair to two output streams.
+ *
+ * An `Unzip` has one `in` port and one `left` and one `right` output port.
+ */
 object Unzip {
 
   final case class UnzipPorts[A, B](in: InPort[(A, B)], left: OutPort[A], right: OutPort[B]) extends Graphs.Ports {
@@ -134,6 +207,11 @@ object Unzip {
       UnzipPorts(new InPort(in.toString), new OutPort(left.toString), new OutPort(right.toString))
   }
 
+  /**
+   * Create a new `Unzip` with the specified attributes.
+   *
+   * @param attributes optional attributes
+   */
   def apply[A, B](attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): UnzipPorts[A, B] = {
     val unzipModule = new UnzipModule(
       new InPort[(A, B)]("Unzip.in"),
@@ -145,6 +223,13 @@ object Unzip {
   }
 }
 
+/**
+ * Takes two streams and outputs one stream formed from the two input streams
+ * by first emitting all of the elements from the first stream and then emitting
+ * all of the elements from the second stream.
+ *
+ * A `Concat` has one `first` port, one `second` port and one `out` port.
+ */
 object Concat {
 
   final case class ConcatPorts[A](first: InPort[A], second: InPort[A], out: OutPort[A]) extends Graphs.Ports {
@@ -155,6 +240,11 @@ object Concat {
       ConcatPorts(new InPort(first.toString), new InPort(second.toString), new OutPort(out.toString))
   }
 
+  /**
+   * Create a new `Concat` with the specified attributes.
+   *
+   * @param attributes optional attributes
+   */
   def apply[A](attributes: OperationAttributes = OperationAttributes.none)(implicit b: FlowGraphBuilder): ConcatPorts[A] = {
     val concatModdule = new ConcatModule(
       new InPort[A]("concat.first"),
@@ -164,7 +254,6 @@ object Concat {
     b.addModule(concatModdule)
     ConcatPorts(concatModdule.first, concatModdule.second, concatModdule.out)
   }
-
 }
 
 object FlowGraph extends FlowGraphApply {

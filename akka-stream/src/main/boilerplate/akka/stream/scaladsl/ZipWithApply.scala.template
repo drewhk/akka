@@ -8,7 +8,13 @@ import akka.stream.scaladsl.Graphs.{ Graph, Ports }
 
 trait ZipWithApply {
 
-  [2..19#def apply[[#A1#], O](zipper: ([#A1#]) ⇒ O)(implicit b: FlowGraphBuilder) =
+  [2..19#/**
+   * Create a `ZipWith1` that takes 1 arguments and a zipper
+   * function that combines the arguments.
+   *
+   * @param zipper function that combines the other 1 arguments
+   */
+  def apply[[#A1#], O](zipper: ([#A1#]) ⇒ O)(implicit b: FlowGraphBuilder) =
     ZipWith1(zipper)#
 
   ]

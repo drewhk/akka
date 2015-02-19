@@ -174,7 +174,7 @@ case class RunnableFlow[Mat](private[stream] val module: StreamLayout.Module) {
   assert(module.isRunnable)
 
   /**
-   * Run this flow and return the [[MaterializedMap]] containing the values for the [[KeyedMaterializable]] of the flow.
+   * Run this flow and return the materialized instance from the flow.
    */
   def run()(implicit materializer: FlowMaterializer): Mat = materializer.materialize(this)
 
