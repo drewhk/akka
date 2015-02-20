@@ -35,8 +35,8 @@ final class Sink[-In, +Mat](m: StreamLayout.Module, val inlet: Inlet[In])
    * Connect this `Sink` to a `Source` and run it. The returned value is the materialized value
    * of the `Source`, e.g. the `Subscriber` of a [[SubscriberSource]].
    */
-  def runWith[Mat2](source: Source[In, Mat2])(implicit materializer: FlowMaterializer): Mat =
-    source.to(this).run()
+  def runWith[Mat2](source: Source[In, Mat2])(implicit materializer: FlowMaterializer): Mat2 =
+    source.to(this, (sourcem: Mat2, sinkm: Mat) ⇒ sourcem).run()
 
   def mapMaterialized[Mat2](f: Mat ⇒ Mat2): Sink[In, Mat2] = {
     val sinkCopy = module.carbonCopy()

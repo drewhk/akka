@@ -76,7 +76,7 @@ class RecipeGlobalRateLimit extends RecipeSpec {
     "work" in {
 
       //#global-limiter-flow
-      def limitGlobal[T](limiter: ActorRef, maxAllowedWait: FiniteDuration): Flow[T, T] = {
+      def limitGlobal[T](limiter: ActorRef, maxAllowedWait: FiniteDuration): Flow[T, T, Unit] = {
         import akka.pattern.ask
         import akka.util.Timeout
         Flow[T].mapAsync { (element: T) =>
@@ -97,11 +97,12 @@ class RecipeGlobalRateLimit extends RecipeSpec {
 
       val probe = SubscriberProbe[String]()
 
-      FlowGraph { implicit b =>
-        import FlowGraphImplicits._
-        val merge = Merge[String]
-        source1 ~> merge ~> Sink(probe)
-        source2 ~> merge
+      FlowGraph() { implicit b =>
+        import FlowGraph.Implicits._
+        val merge = Merge[String](2)
+        source1 ~> merge.in(0)
+        source2 ~> merge.in(1)
+        merge.out ~> Sink(probe)
       }.run()
 
       probe.expectSubscription().request(1000)

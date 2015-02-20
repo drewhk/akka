@@ -18,10 +18,10 @@ class RecipeReduceByKey extends RecipeSpec {
 
       //#word-count
       // split the words into separate streams first
-      val wordStreams: Source[(String, Source[String])] = words.groupBy(identity)
+      val wordStreams: Source[(String, Source[String, Unit]), Unit] = words.groupBy(identity)
 
       // add counting logic to the streams
-      val countedWords: Source[Future[(String, Int)]] = wordStreams.map {
+      val countedWords: Source[Future[(String, Int)], Unit] = wordStreams.map {
         case (word, wordStream) =>
           wordStream.runFold((word, 0)) {
             case ((w, count), _) => (w, count + 1)
@@ -29,7 +29,7 @@ class RecipeReduceByKey extends RecipeSpec {
       }
 
       // get a stream of word counts
-      val counts: Source[(String, Int)] =
+      val counts: Source[(String, Int), Unit] =
         countedWords
           .buffer(MaximumDistinctWords, OverflowStrategy.error)
           .mapAsync(identity)
@@ -52,7 +52,7 @@ class RecipeReduceByKey extends RecipeSpec {
       def reduceByKey[In, K, Out](
         maximumGroupSize: Int,
         groupKey: (In) => K,
-        foldZero: (K) => Out)(fold: (Out, In) => Out): Flow[In, (K, Out)] = {
+        foldZero: (K) => Out)(fold: (Out, In) => Out): Flow[In, (K, Out), Unit] = {
 
         val groupStreams = Flow[In].groupBy(groupKey)
         val reducedValues = groupStreams.map {
