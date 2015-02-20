@@ -28,14 +28,14 @@ class RecipeMultiGroupBy extends RecipeSpec {
       }
 
       //#multi-groupby
-      val messageAndTopic: Source[(Message, Topic)] = elems.mapConcat { msg: Message =>
+      val messageAndTopic: Source[(Message, Topic), Unit] = elems.mapConcat { msg: Message =>
         val topicsForMessage = topicMapper(msg)
         // Create a (Msg, Topic) pair for each of the topics
         // the message belongs to
         topicsForMessage.map(msg -> _)
       }
 
-      val multiGroups: Source[(Topic, Source[String])] = messageAndTopic.groupBy(_._2).map {
+      val multiGroups: Source[(Topic, Source[String, Unit]), Unit] = messageAndTopic.groupBy(_._2).map {
         case (topic, topicStream) =>
           // chopping of the topic from the (Message, Topic) pairs
           (topic, topicStream.map(_._1))

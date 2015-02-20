@@ -83,7 +83,7 @@ class RecipeByteStrings extends RecipeSpec {
       val data = Source(List(ByteString(1, 2), ByteString(3), ByteString(4, 5, 6), ByteString(7, 8, 9)))
 
       //#compacting-bytestrings
-      val compacted: Source[ByteString] = data.map(_.compact)
+      val compacted: Source[ByteString, Unit] = data.map(_.compact)
       //#compacting-bytestrings
 
       Await.result(compacted.grouped(10).runWith(Sink.head), 3.seconds).forall(_.isCompact) should be(true)
