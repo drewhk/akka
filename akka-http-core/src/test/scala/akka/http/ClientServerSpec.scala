@@ -51,7 +51,7 @@ class ClientServerSpec extends WordSpec with Matchers with BeforeAndAfterAll {
       val (hostname, port) = temporaryServerHostnameAndPort()
       val binding = Http().bind(hostname, port)
       val probe1 = StreamTestKit.SubscriberProbe[Http.IncomingConnection]()
-      val b1 = Await.result(binding.to(Sink(probe1), Keep.left).run(), 3.seconds)
+      val b1 = Await.result(binding.toMat(Sink(probe1))(Keep.left).run(), 3.seconds)
       probe1.expectSubscription()
 
       val probe2 = StreamTestKit.SubscriberProbe[Http.IncomingConnection]()
@@ -60,7 +60,7 @@ class ClientServerSpec extends WordSpec with Matchers with BeforeAndAfterAll {
 
       Await.result(b1.unbind(), 1.second)
       val probe3 = StreamTestKit.SubscriberProbe[Http.IncomingConnection]()
-      val b3 = Await.result(binding.to(Sink(probe3), Keep.left).run(), 3.seconds)
+      val b3 = Await.result(binding.toMat(Sink(probe3))(Keep.left).run(), 3.seconds)
       probe3.expectSubscription() // we bound a second time, which means the previous unbind was successful
       Await.result(b3.unbind(), 1.second)
     }
@@ -110,7 +110,7 @@ class ClientServerSpec extends WordSpec with Matchers with BeforeAndAfterAll {
       private val HttpRequest(POST, uri, List(Accept(Seq(MediaRanges.`*/*`)), Host(_, _), `User-Agent`(_)),
         Chunked(`chunkedContentType`, chunkStream), HttpProtocols.`HTTP/1.1`) = serverIn.expectNext()
       uri shouldEqual Uri(s"http://$hostname:$port/chunked")
-      Await.result(chunkStream.grouped(4).runWith(Sink.head), 100.millis) shouldEqual chunks
+      Await.result(chunkStream.grouped(4).runWith(Sink.head()), 100.millis) shouldEqual chunks
 
       val serverOutSub = serverOut.expectSubscription()
       serverOutSub.expectRequest()
@@ -120,7 +120,7 @@ class ClientServerSpec extends WordSpec with Matchers with BeforeAndAfterAll {
       clientInSub.request(1)
       val HttpResponse(StatusCodes.PartialContent, List(Age(42), Server(_), Date(_)),
         Chunked(`chunkedContentType`, chunkStream2), HttpProtocols.`HTTP/1.1`) = clientIn.expectNext()
-      Await.result(chunkStream2.grouped(1000).runWith(Sink.head), 100.millis) shouldEqual chunks
+      Await.result(chunkStream2.grouped(1000).runWith(Sink.head()), 100.millis) shouldEqual chunks
 
       clientOutSub.sendComplete()
       serverInSub.request(1) // work-around for #16552
@@ -180,8 +180,8 @@ class ClientServerSpec extends WordSpec with Matchers with BeforeAndAfterAll {
       val responseSubscriberProbe = StreamTestKit.SubscriberProbe[HttpResponse]()
 
       val connectionFuture = Source(requestPublisherProbe)
-        .via(Http().outgoingConnection(hostname, port, settings = settings))
-        .to(Sink(responseSubscriberProbe), Keep.left).run()
+        .viaMat(Http().outgoingConnection(hostname, port, settings = settings))(Keep.right)
+        .to(Sink(responseSubscriberProbe)).run()
 
       val connection = Await.result(connectionFuture, 3.seconds)
 
