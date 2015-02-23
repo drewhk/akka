@@ -32,8 +32,8 @@ private[http] object HttpServer {
     httpResponses: Inlet[HttpResponse],
     httpRequests: Outlet[HttpRequest]) extends Shape {
 
-    override def inlets: Seq[Inlet[_]] = bytesIn :: httpResponses :: Nil
-    override def outlets: Seq[Outlet[_]] = bytesOut :: httpRequests :: Nil
+    override def inlets: immutable.Seq[Inlet[_]] = bytesIn :: httpResponses :: Nil
+    override def outlets: immutable.Seq[Outlet[_]] = bytesOut :: httpRequests :: Nil
 
     override def deepCopy() = HttpServerPorts(
       new Inlet(bytesIn.toString),
