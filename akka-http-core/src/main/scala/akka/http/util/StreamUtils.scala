@@ -137,7 +137,7 @@ private[http] object StreamUtils {
   def transformMultiple(input: Source[ByteString, Unit], transformers: immutable.Seq[Flow[ByteString, ByteString, _]])(implicit materializer: FlowMaterializer): immutable.Seq[Source[ByteString, Unit]] =
     transformers match {
       case Nil      ⇒ Nil
-      case Seq(one) ⇒ Vector(input.viaMat(one)(Keep.left))
+      case Seq(one) ⇒ Vector(input.via(one))
       case multiple ⇒
         val (fanoutSub, fanoutPub) = Source.subscriber[ByteString]().toMat(Sink.fanoutPublisher(16, 16))(Pair.apply).run()
         val sources = transformers.map { flow ⇒
