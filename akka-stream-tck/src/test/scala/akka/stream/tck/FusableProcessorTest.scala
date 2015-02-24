@@ -6,7 +6,7 @@ package akka.stream.tck
 import java.util.concurrent.atomic.AtomicInteger
 
 import akka.stream.impl.Stages.Identity
-import akka.stream.scaladsl.Flow
+import akka.stream.scaladsl.{ OperationAttributes, Flow }
 import akka.stream.{ FlowMaterializer, MaterializerSettings }
 import org.reactivestreams.{ Processor, Publisher }
 
@@ -20,7 +20,9 @@ class FusableProcessorTest extends AkkaIdentityProcessorVerification[Int] {
 
     implicit val materializer = FlowMaterializer(settings)(system)
 
-    processorFromFlow(Flow[Int].andThen(Identity()))
+    processorFromFlow(
+      // withAttributes "wraps" the underlying identity and protects it from automatic removal
+      Flow[Int].andThen(Identity()).withAttributes(OperationAttributes.name("identity")))
   }
 
   override def createHelperPublisher(elements: Long): Publisher[Int] = {
