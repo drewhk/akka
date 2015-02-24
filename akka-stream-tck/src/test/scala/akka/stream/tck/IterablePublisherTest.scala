@@ -17,6 +17,6 @@ class IterablePublisherTest extends AkkaPublisherVerification[Int] {
       else
         0 until elements.toInt
 
-    Source(iterable).runWith(Sink.publisher)
+    Source(iterable).runWith(Sink.publisher())
   }
 }
