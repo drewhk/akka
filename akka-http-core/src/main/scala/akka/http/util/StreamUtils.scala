@@ -64,6 +64,7 @@ private[http] object StreamUtils {
 
       def skipping = new State {
         var toSkip = start
+
         override def onPush(element: ByteString, ctx: Context[ByteString]): Directive =
           if (element.length < toSkip) {
             // keep skipping
@@ -75,8 +76,10 @@ private[http] object StreamUtils {
             current.onPush(element.drop(toSkip.toInt), ctx)
           }
       }
+
       def taking(initiallyRemaining: Long) = new State {
         var remaining: Long = initiallyRemaining
+
         override def onPush(element: ByteString, ctx: Context[ByteString]): Directive = {
           val data = element.take(math.min(remaining, Int.MaxValue).toInt)
           remaining -= data.size
@@ -93,6 +96,7 @@ private[http] object StreamUtils {
   def limitByteChunksStage(maxBytesPerChunk: Int): PushPullStage[ByteString, ByteString] =
     new StatefulStage[ByteString, ByteString] {
       def initial = WaitingForData
+
       case object WaitingForData extends State {
         def onPush(elem: ByteString, ctx: Context[ByteString]): Directive =
           if (elem.size <= maxBytesPerChunk) ctx.push(elem)
@@ -101,6 +105,7 @@ private[http] object StreamUtils {
             ctx.push(elem.take(maxBytesPerChunk))
           }
       }
+
       case class DeliveringData(remaining: ByteString) extends State {
         def onPush(elem: ByteString, ctx: Context[ByteString]): Directive =
           throw new IllegalStateException("Not expecting data")
@@ -165,6 +170,7 @@ private[http] object StreamUtils {
         throw new IllegalStateException("One time source can only be instantiated once")
 
       def hasNext: Boolean = !finished
+
       def next(): ByteString =
         if (!finished) {
           val buffer = new Array[Byte](defaultChunkSize)
@@ -194,23 +200,6 @@ private[http] object StreamUtils {
       elem
     }
   }
-
-  def runStrict(sourceData: ByteString, transformer: Flow[ByteString, ByteString, _], maxByteSize: Long, maxElements: Int): Try[Option[ByteString]] =
-    runStrict(Iterator.single(sourceData), transformer, maxByteSize, maxElements)
-
-  def runStrict(sourceData: Iterator[ByteString], transformer: Flow[ByteString, ByteString, _], maxByteSize: Long, maxElements: Int): Try[Option[ByteString]] =
-    Try {
-      // FIXME FIXME FIXME: This is just to make the tests pass, this should not get into the real version
-      import scala.concurrent.Await
-      import scala.concurrent.duration._
-
-      import akka.actor.ActorSystem
-      val sys = ActorSystem()
-      implicit val mat = FlowMaterializer()(sys)
-
-      Some(Await.result(Source(() ⇒ sourceData).via(transformer).runFold(ByteString.empty)(_ ++ _), 3.seconds))
-    }
-
 }
 
 /**

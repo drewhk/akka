@@ -148,19 +148,11 @@ object HttpEntity {
   // TODO: re-establish serializability
   // TODO: equal/hashcode ?
 
-  object Strict {
-    // FIXME configurable?
-    private val MaxByteSize = 1L * 1024 * 1024 * 1024
-    private val MaxElements = 1000
-  }
-
   /**
    * The model for the entity of a "regular" unchunked HTTP message with known, fixed data.
    */
   final case class Strict(contentType: ContentType, data: ByteString)
     extends japi.HttpEntityStrict with UniversalEntity {
-
-    import Strict._
 
     def contentLength: Long = data.length
 
@@ -172,26 +164,10 @@ object HttpEntity {
       FastFuture.successful(this)
 
     override def transformDataBytes(transformer: Flow[ByteString, ByteString, _]): MessageEntity =
-      StreamUtils.runStrict(data, transformer, MaxByteSize, MaxElements) match {
-        case Success(Some(newData)) ⇒
-          copy(data = newData)
-        case Success(None) ⇒
-          Chunked.fromData(contentType, Source.single(data).viaMat(transformer)(Keep.left))
-        case Failure(ex) ⇒
-          Chunked(contentType, Source.failed(ex))
-      }
+      Chunked.fromData(contentType, Source.single(data).via(transformer))
 
     override def transformDataBytes(newContentLength: Long, transformer: Flow[ByteString, ByteString, _]): UniversalEntity =
-      StreamUtils.runStrict(data, transformer, MaxByteSize, MaxElements) match {
-        case Success(Some(newData)) ⇒
-          if (newData.length.toLong != newContentLength)
-            throw new IllegalStateException(s"Transformer didn't produce as much bytes (${newData.length}:'${newData.utf8String}') as claimed ($newContentLength)")
-          copy(data = newData)
-        case Success(None) ⇒
-          Default(contentType, newContentLength, Source.single(data).viaMat(transformer)(Keep.left))
-        case Failure(ex) ⇒
-          Default(contentType, newContentLength, Source.failed(ex))
-      }
+      Default(contentType, newContentLength, Source.single(data).via(transformer))
 
     def withContentType(contentType: ContentType): Strict =
       if (contentType == this.contentType) this else copy(contentType = contentType)
