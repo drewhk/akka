@@ -90,7 +90,7 @@ private[http] object StreamUtils {
     Flow[ByteString].section(name("sliceBytes"))(_.transform(() ⇒ transformer))
   }
 
-  def limitByteChunksStage(maxBytesPerChunk: Int): Stage[ByteString, ByteString] =
+  def limitByteChunksStage(maxBytesPerChunk: Int): PushPullStage[ByteString, ByteString] =
     new StatefulStage[ByteString, ByteString] {
       def initial = WaitingForData
       case object WaitingForData extends State {
@@ -129,26 +129,22 @@ private[http] object StreamUtils {
    * Applies a sequence of transformers on one source and returns a sequence of sources with the result. The input source
    * will only be traversed once.
    */
-  def transformMultiple(input: Source[ByteString, Unit], transformers: immutable.Seq[Flow[ByteString, ByteString, _]])(implicit materializer: FlowMaterializer): immutable.Seq[Source[ByteString, Unit]] = ???
-  //    transformers match {
-  //      case Nil      ⇒ Nil
-  //      case Seq(one) ⇒ Vector(input.via(one, Keep.left))
-  //      case multiple ⇒
-  //        val results = Vector.fill(multiple.size)(Sink.publisher[ByteString])
-  //        val mat =
-  //          FlowGraph() { implicit b ⇒
-  //            import FlowGraph.Implicits._
-  //
-  //            val broadcast = Broadcast[ByteString](multiple.size, OperationAttributes.name("transformMultipleInputBroadcast"))
-  //            input ~> broadcast.in
-  //            var portIdx = 0
-  //            (multiple, results).zipped.foreach { (trans, sink) ⇒
-  //              broadcast.out(portIdx) ~> trans ~> sink
-  //              portIdx += 1
-  //            }
-  //          }.run()
-  //        results.map(s ⇒ Source(mat))
-  //    }
+  def transformMultiple(input: Source[ByteString, Unit], transformers: immutable.Seq[Flow[ByteString, ByteString, _]])(implicit materializer: FlowMaterializer): immutable.Seq[Source[ByteString, Unit]] =
+    transformers match {
+      case Nil      ⇒ Nil
+      case Seq(one) ⇒ Vector(input.viaMat(one)(Keep.left))
+      case multiple ⇒
+        val (fanoutSub, fanoutPub) = Source.subscriber[ByteString]().toMat(Sink.fanoutPublisher(16, 16))(Pair.apply).run()
+        val sources = transformers.map { flow ⇒
+          // Doubly wrap to ensure that subscription to the running publisher happens before the final sources
+          // are exposed, so there is no race
+          Source(Source(fanoutPub).via(flow).runWith(Sink.publisher()))
+        }
+        // The fanout publisher must be wired to the original source after all fanout subscribers have been subscribed
+        input.runWith(Sink(fanoutSub))
+        sources
+
+    }
 
   def mapEntityError(f: Throwable ⇒ Throwable): RequestEntity ⇒ RequestEntity =
     _.transformDataBytes(mapErrorTransformer(f))
@@ -191,8 +187,6 @@ private[http] object StreamUtils {
    * Returns a source that can only be used once for testing purposes.
    */
   def oneTimeSource[T, Mat](other: Source[T, Mat]): Source[T, Mat] = {
-    import akka.stream.impl._
-
     val onlyOnceFlag = new AtomicBoolean(false)
     other.map { elem ⇒
       if (onlyOnceFlag.get() || !onlyOnceFlag.compareAndSet(false, true))
