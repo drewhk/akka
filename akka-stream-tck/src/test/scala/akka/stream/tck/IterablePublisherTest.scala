@@ -19,4 +19,9 @@ class IterablePublisherTest extends AkkaPublisherVerification[Int] {
 
     Source(iterable).runWith(Sink.publisher())
   }
+
+  override def spec317_mustSignalOnErrorWhenPendingAboveLongMaxValue(): Unit = {
+    // FIXME: This test needs RC3
+    notVerified()
+  }
 }
