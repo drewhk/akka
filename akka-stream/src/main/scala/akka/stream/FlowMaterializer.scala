@@ -177,7 +177,6 @@ object MaterializerSettings {
       config.getInt("max-input-buffer-size"),
       config.getString("dispatcher"),
       StreamSubscriptionTimeoutSettings(config),
-      config.getString("file-io-dispatcher"),
       config.getBoolean("debug-logging"))
 
   /**
@@ -216,7 +215,6 @@ final case class MaterializerSettings(
   maxInputBufferSize: Int,
   dispatcher: String,
   subscriptionTimeoutSettings: StreamSubscriptionTimeoutSettings,
-  fileIODispatcher: String, // FIXME Why does this exist?!
   debugLogging: Boolean) {
 
   require(initialInputBufferSize > 0, "initialInputBufferSize must be > 0")

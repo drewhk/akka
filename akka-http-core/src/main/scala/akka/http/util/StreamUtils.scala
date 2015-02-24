@@ -159,7 +159,9 @@ private[http] object StreamUtils {
    *
    * FIXME: should be provided by akka-stream, see #15588
    */
-  def fromInputStreamSource(inputStream: InputStream, defaultChunkSize: Int = 65536): Source[ByteString, Unit] = {
+  def fromInputStreamSource(inputStream: InputStream,
+                            fileIODispatcher: String,
+                            defaultChunkSize: Int = 65536): Source[ByteString, Unit] = {
     import akka.stream.impl._
 
     val onlyOnceFlag = new AtomicBoolean(false)
@@ -183,9 +185,7 @@ private[http] object StreamUtils {
         } else ByteString.empty
     }
 
-    // FIXME FIXME FIXME: This should take the fileIODispatcher somehow, see commented out line
-    //Source(() ⇒ iterator).withAttributes(OperationAttributes.dispatcher(settings.fileIODispatcher))
-    Source(() ⇒ iterator)
+    Source(() ⇒ iterator).withAttributes(OperationAttributes.dispatcher(fileIODispatcher))
 
   }
 
