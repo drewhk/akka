@@ -103,6 +103,7 @@ class AeronSource(
         sub.close()
         taskRunner.command(Remove(addPollTask.task))
         flightRecorder.loFreq(AeronSource_Stopped, channelMetadata)
+        flightRecorder.flushHiFreqBatch()
       }
 
       // OutHandler

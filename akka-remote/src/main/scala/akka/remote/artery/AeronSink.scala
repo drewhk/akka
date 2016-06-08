@@ -121,6 +121,7 @@ class AeronSink(
         flightRecorder.loFreq(AeronSink_PublicationClosed, channelMetadata)
         completed.complete(completedValue)
         flightRecorder.loFreq(AeronSink_Stopped, channelMetadata)
+        flightRecorder.flushHiFreqBatch()
       }
 
       // InHandler

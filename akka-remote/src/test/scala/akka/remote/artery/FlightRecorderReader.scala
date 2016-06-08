@@ -162,12 +162,42 @@ class FlightRecorderReader(fileChannel: FileChannel) {
     }
   }
 
-  case class RichEntry(timeStamp: Instant, dirty: Boolean, code: Long, metadata: Array[Byte]) {
-    override def toString: String = s"[$timeStamp] ${if (dirty) "#" else ""} \t $code | ${metadata.mkString(",")}"
+  sealed trait Entry {
+    def timeStamp: Instant
+    def dirty: Boolean
+    def code: Long
   }
 
-  case class CompactEntry(timeStamp: Instant, dirty: Boolean, code: Long, param: Long) {
-    override def toString: String = s"[$timeStamp] ${if (dirty) "#" else ""} \t $code | $param"
+  case class RichEntry(timeStamp: Instant, dirty: Boolean, code: Long, metadata: Array[Byte]) extends Entry {
+    override def toString: String = s"[$timeStamp] ${if (dirty) "#" else ""} " +
+      s"${FlightRecorderEvents.humandReadable(code.toInt)} | ${new String(metadata, "US-ASCII")}"
+  }
+
+  case class CompactEntry(timeStamp: Instant, dirty: Boolean, code: Long, param: Long) extends Entry {
+    override def toString: String = s"[$timeStamp] ${if (dirty) "#" else ""} " +
+      s"${FlightRecorderEvents.humandReadable(code.toInt)} | $param"
+  }
+
+  def allEntries(log: Int, level: Int): Iterator[Entry] = new Iterator[Entry] {
+    val iterators = Array(
+      structure.alertLog.logs(log).richEntries.buffered,
+      structure.loFreqLog.logs(log).richEntries.buffered,
+      structure.hiFreqLog.logs(log).compactEntries.buffered
+    ).take(level)
+
+    override def hasNext: Boolean = iterators.exists(_.hasNext)
+
+    override def next(): Entry = {
+      var nextIterator: BufferedIterator[Entry] = iterators(0)
+
+      for (level ← 1 until level) {
+        val candidate = iterators(level)
+        if (nextIterator.isEmpty || (candidate.hasNext && candidate.head.timeStamp.compareTo(nextIterator.head.timeStamp) < 0))
+          nextIterator = candidate
+      }
+
+      nextIterator.next()
+    }
   }
 
   private val fileBuffer = new MappedResizeableBuffer(fileChannel, 0, TotalSize)

@@ -35,4 +35,36 @@ object FlightRecorderEvents {
   val AeronSource_Received = 23
   val AeronSource_DelegateToTaskRunner = 24
 
+  val humandReadable: Map[Int, String] = Map(
+    Transport_MediaDriverStarted → "Media driver started",
+    Transport_AeronStarted → "Aeron started",
+    Transport_AeronErrorLogStarted → "Aeron error log started",
+    Transport_TaskRunnerStarted → "Task runner started",
+    Transport_UniqueAddressSet → "Unique address set",
+    Transport_MaterializerStarted → "Materializer started",
+    Transport_StartupFinished → "Transport startup finished",
+    Transport_OnAvailableImage → "Image available",
+    Transport_KillSwitchPulled → "Transport KillSwitch pulled",
+    Transport_Stopped → "Transport stopped",
+    Transport_AeronErrorLogTaskStopped → "Aeron error log task stopped",
+    Transport_MediaFileDeleted → "Media file deleted",
+    Transport_FlightRecorderClose → "Flight recorder closed",
+
+    // Aeron Sink events
+    AeronSink_Started → "Aeron sink started",
+    AeronSink_TaskRunnerRemoved → "Sink removed from task runner",
+    AeronSink_PublicationClosed → "Publication closed",
+    AeronSink_Stopped → "Aeron sink stopped",
+    AeronSink_EnvelopeGrabbed → "Aeron sink grabbed envelope",
+    AeronSink_EnvelopeOffered → "Envelope successfully offered",
+    AeronSink_GaveUpEnvelope → "Sink gave up on envelope",
+    AeronSink_DelegateToTaskRunner → "Send delegated to taskrunner",
+
+    // Aeron Source events
+    AeronSource_Started → "Aeron source started",
+    AeronSource_Stopped → "Aeron source stopped",
+    AeronSource_Received → "Aeron source received envelope",
+    AeronSource_DelegateToTaskRunner → "Aeron source delgated polling to task runner"
+  )
+
 }
