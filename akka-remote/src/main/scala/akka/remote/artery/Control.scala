@@ -4,14 +4,12 @@
 package akka.remote.artery
 
 import java.util.ArrayDeque
+
 import scala.concurrent.Future
 import scala.concurrent.Promise
 import akka.Done
 import akka.remote.EndpointManager.Send
-import akka.stream.Attributes
-import akka.stream.FlowShape
-import akka.stream.Inlet
-import akka.stream.Outlet
+import akka.stream._
 import akka.stream.stage.CallbackWrapper
 import akka.stream.stage.GraphStageLogic
 import akka.stream.stage.GraphStageWithMaterializedValue
@@ -161,20 +159,23 @@ private[akka] class OutboundControlJunction(outboundContext: OutboundContext)
     // FIXME see issue #20503 related to CallbackWrapper, we might implement this in a better way
     val logic = new GraphStageLogic(shape) with CallbackWrapper[ControlMessage] with InHandler with OutHandler with StageLogging {
       import OutboundControlJunction._
+      import FlightRecorderEvents._
 
+      private var flightRecorder: EventSink = _
       private val sendControlMessageCallback = getAsyncCallback[ControlMessage](internalSendControlMessage)
       private val maxControlMessageBufferSize: Int = 1024 // FIXME config
       private val buffer = new ArrayDeque[Send]
 
       override def preStart(): Unit = {
+        flightRecorder = FlightRecorderExtension(materializer).createEventSink()
         initCallback(sendControlMessageCallback.invoke)
       }
 
       // InHandler
       override def onPush(): Unit = {
-        if (buffer.isEmpty && isAvailable(out))
+        if (buffer.isEmpty && isAvailable(out)) {
           push(out, grab(in))
-        else
+        } else
           buffer.offer(grab(in))
       }
 
@@ -187,6 +188,8 @@ private[akka] class OutboundControlJunction(outboundContext: OutboundContext)
       }
 
       private def internalSendControlMessage(message: ControlMessage): Unit = {
+        // FIXME: This might become a bottleneck
+        flightRecorder.loFreq(ControlMessageSent, message.getClass.getName)
         if (buffer.isEmpty && isAvailable(out))
           push(out, wrap(message))
         else if (buffer.size < maxControlMessageBufferSize)
@@ -194,6 +197,7 @@ private[akka] class OutboundControlJunction(outboundContext: OutboundContext)
         else {
           // it's alright to drop control messages
           log.debug("Dropping control message [{}] due to full buffer.", message.getClass.getName)
+          flightRecorder.alert(ControlMessageDropped, message.getClass.getName)
         }
       }
 

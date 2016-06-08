@@ -58,10 +58,14 @@ private[akka] class OutboundHandshake(outboundContext: OutboundContext, timeout:
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
     new TimerGraphStageLogic(shape) with InHandler with OutHandler {
       import OutboundHandshake._
+      import FlightRecorderEvents._
 
+      private var flightRecorder: EventSink = _
       private var handshakeState: HandshakeState = Start
       private var pendingMessage: Send = null
       private var injectHandshakeTickScheduled = false
+
+      override def preStart(): Unit = flightRecorder = FlightRecorderExtension(materializer).createEventSink()
 
       // InHandler
       override def onPush(): Unit = {
@@ -105,6 +109,7 @@ private[akka] class OutboundHandshake(outboundContext: OutboundContext, timeout:
               uniqueRemoteAddress.foreach {
                 getAsyncCallback[UniqueAddress] { a ⇒
                   if (handshakeState != Completed) {
+                    flightRecorder.loFreq(Handshake_Completed, a.toString)
                     handshakeCompleted()
                     if (isAvailable(out))
                       pull(in)
@@ -123,6 +128,7 @@ private[akka] class OutboundHandshake(outboundContext: OutboundContext, timeout:
       private def pushHandshakeReq(): Unit = {
         injectHandshakeTickScheduled = true
         scheduleOnce(InjectHandshakeTick, injectHandshakeInterval)
+        flightRecorder.loFreq(Handshake_RequestInjected, outboundContext.localAddress.toString)
         push(out, Send(HandshakeReq(outboundContext.localAddress), OptionVal.None, outboundContext.dummyRecipient, None))
       }
 

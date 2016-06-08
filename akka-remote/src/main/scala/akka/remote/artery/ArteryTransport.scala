@@ -424,7 +424,7 @@ private[remote] class ArteryTransport(_system: ExtendedActorSystem, _provider: R
     _addresses = Set(_localAddress.address)
 
     // TODO: This probably needs to be a global value instead of an event as events might rotate out of the log
-    topLevelFREvents.loFreq(Transport_UniqueAddressSet, _localAddress.toString().getBytes("US-ASCII"))
+    topLevelFREvents.loFreq(Transport_UniqueAddressSet, _localAddress.toString)
 
     val materializerSettings = ActorMaterializerSettings(
       remoteSettings.config.getConfig("akka.remote.artery.advanced.materializer"))
@@ -450,7 +450,7 @@ private[remote] class ArteryTransport(_system: ExtendedActorSystem, _provider: R
       driverContext.driverTimeoutMs(SECONDS.toNanos(20))
       val driver = MediaDriver.launchEmbedded(driverContext)
       log.debug("Started embedded media driver in directory [{}]", driver.aeronDirectoryName)
-      topLevelFREvents.loFreq(Transport_MediaDriverStarted, driver.aeronDirectoryName().getBytes("US-ASCII"))
+      topLevelFREvents.loFreq(Transport_MediaDriverStarted, driver.aeronDirectoryName)
       mediaDriver = Some(driver)
     }
   }

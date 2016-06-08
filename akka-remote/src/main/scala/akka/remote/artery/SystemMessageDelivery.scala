@@ -56,7 +56,9 @@ private[akka] class SystemMessageDelivery(
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
     new TimerGraphStageLogic(shape) with InHandler with OutHandler with ControlMessageObserver {
+      import FlightRecorderEvents._
 
+      private var flightRecorder: EventSink = _
       private var replyObserverAttached = false
       private var seqNo = 0L // sequence number for the first message will be 1
       private val unacknowledged = new ArrayDeque[Send]
@@ -68,9 +70,11 @@ private[akka] class SystemMessageDelivery(
       private def remoteAddress = outboundContext.remoteAddress
 
       override def preStart(): Unit = {
+        flightRecorder = FlightRecorderExtension(materializer).createEventSink()
         implicit val ec = materializer.executionContext
         outboundContext.controlSubject.attach(this).foreach {
           getAsyncCallback[Done] { _ ⇒
+            flightRecorder.loFreq(SystemMessage_ReplyObserverAttached, NoMetaData)
             replyObserverAttached = true
             if (isAvailable(out))
               pull(in) // onPull from downstream already called
@@ -132,8 +136,13 @@ private[akka] class SystemMessageDelivery(
       }
 
       private def ack(n: Long): Unit = {
-        if (n <= seqNo)
+        if (n <= seqNo) {
           clearUnacknowledged(n)
+          flightRecorder.hiFreq(SystemMessage_Acked, n)
+        } else {
+          flightRecorder.hiFreq(SystemMessage_AckIgnored, n)
+        }
+
       }
 
       @tailrec private def clearUnacknowledged(ackedSeqNo: Long): Unit = {
@@ -151,8 +160,14 @@ private[akka] class SystemMessageDelivery(
       }
 
       private def tryResend(): Unit = {
-        if (isAvailable(out) && !resending.isEmpty)
-          push(out, resending.poll())
+        flightRecorder.loFreq(SystemMessage_TryResend, NoMetaData)
+        if (isAvailable(out) && !resending.isEmpty) {
+          val msg = resending.poll()
+          push(out, msg)
+          flightRecorder.hiFreq(SystemMessage_Resent, msg.message.asInstanceOf[SystemMessageEnvelope].seqNo)
+        } else {
+          flightRecorder.loFreq(SystemMessage_ResendIgnored, NoMetaData)
+        }
       }
 
       // InHandler
@@ -171,21 +186,25 @@ private[akka] class SystemMessageDelivery(
               val sendMsg = s.copy(message = SystemMessageEnvelope(msg, seqNo, localAddress))
               unacknowledged.offer(sendMsg)
               scheduleOnce(ResendTick, resendInterval)
-              if (resending.isEmpty && isAvailable(out))
+              if (resending.isEmpty && isAvailable(out)) {
+                flightRecorder.hiFreq(SystemMessage_Sent, seqNo)
                 push(out, sendMsg)
-              else {
+              } else {
+                flightRecorder.hiFreq(SystemMessage_Buffered, seqNo)
                 resending.offer(sendMsg)
                 tryResend()
               }
             } else {
               // buffer overflow
               outboundContext.quarantine(reason = s"System message delivery buffer overflow, size [$maxBufferSize]")
+              flightRecorder.alert(SystemMessage_BufferOverflow, msg.toString)
               pull(in)
             }
         }
       }
 
       private def clear(): Unit = {
+        flightRecorder.loFreq(SystemMessage_ClearBuffer, NoMetaData)
         seqNo = 0L // sequence number for the first message will be 1
         unacknowledged.clear()
         resending.clear()
@@ -219,10 +238,14 @@ private[akka] class SystemMessageAcker(inboundContext: InboundContext) extends G
 
   override def createLogic(inheritedAttributes: Attributes): GraphStageLogic =
     new GraphStageLogic(shape) with InHandler with OutHandler {
+      import FlightRecorderEvents._
 
+      private var flightRecorder: EventSink = _
       var seqNo = 1L
 
       def localAddress = inboundContext.localAddress
+
+      override def preStart(): Unit = flightRecorder = FlightRecorderExtension(materializer).createEventSink()
 
       // InHandler
       override def onPush(): Unit = {
@@ -230,14 +253,17 @@ private[akka] class SystemMessageAcker(inboundContext: InboundContext) extends G
         env.message match {
           case sysEnv @ SystemMessageEnvelope(_, n, ackReplyTo) ⇒
             if (n == seqNo) {
+              flightRecorder.hiFreq(SystemMessage_Acking, n)
               inboundContext.sendControl(ackReplyTo.address, Ack(n, localAddress))
               seqNo += 1
               val unwrapped = env.withMessage(sysEnv.message)
               push(out, unwrapped)
             } else if (n < seqNo) {
+              flightRecorder.hiFreq(SystemMessage_Acking, n)
               inboundContext.sendControl(ackReplyTo.address, Ack(n, localAddress))
               pull(in)
             } else {
+              flightRecorder.hiFreq(SystemMessage_Nacking, seqNo - 1)
               inboundContext.sendControl(ackReplyTo.address, Nack(seqNo - 1, localAddress))
               pull(in)
             }

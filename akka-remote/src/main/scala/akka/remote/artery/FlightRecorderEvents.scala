@@ -35,6 +35,28 @@ object FlightRecorderEvents {
   val AeronSource_Received = 23
   val AeronSource_DelegateToTaskRunner = 24
 
+  // Control channel events
+  val ControlMessageSent = 100
+  val ControlMessageDropped = 101
+
+  // Handshake events
+  val Handshake_RequestInjected = 200
+  val Handshake_Completed = 201
+
+  // System message delivery events
+  val SystemMessage_ReplyObserverAttached = 300
+  val SystemMessage_TryResend = 301
+  val SystemMessage_ResendIgnored = 302
+  val SystemMessage_ClearBuffer = 303
+  val SystemMessage_Buffered = 304
+  val SystemMessage_Sent = 305
+  val SystemMessage_Resent = 306
+  val SystemMessage_BufferOverflow = 307
+  val SystemMessage_Acked = 308
+  val SystemMessage_AckIgnored = 309
+  val SystemMessage_Acking = 310
+  val SystemMessage_Nacking = 311
+
   val humandReadable: Map[Int, String] = Map(
     Transport_MediaDriverStarted → "Media driver started",
     Transport_AeronStarted → "Aeron started",
@@ -64,7 +86,29 @@ object FlightRecorderEvents {
     AeronSource_Started → "Aeron source started",
     AeronSource_Stopped → "Aeron source stopped",
     AeronSource_Received → "Aeron source received envelope",
-    AeronSource_DelegateToTaskRunner → "Aeron source delgated polling to task runner"
+    AeronSource_DelegateToTaskRunner → "Aeron source delgated polling to task runner",
+
+    // Control channel events
+    ControlMessageSent → "Control message sent",
+    ControlMessageDropped → "Control message dropped",
+
+    // Handshake events
+    Handshake_RequestInjected → "Handshake request injected",
+    Handshake_Completed → "Handshake completed",
+
+    // System message delivery events
+    SystemMessage_ReplyObserverAttached → "Reply observer attached",
+    SystemMessage_TryResend → "Trying to resend",
+    SystemMessage_ResendIgnored → "Resend ignored due to backpressure",
+    SystemMessage_ClearBuffer → "Clear resend buffer",
+    SystemMessage_Buffered → "Buffered system message",
+    SystemMessage_Sent → "Sent system message",
+    SystemMessage_Resent → "Resent system message",
+    SystemMessage_BufferOverflow → "Buffer overflow",
+    SystemMessage_Acked → "Received ACK",
+    SystemMessage_AckIgnored → "Ignored incoming ACK",
+    SystemMessage_Acking → "Sending ACK",
+    SystemMessage_Nacking → "Sending NACK"
   )
 
 }

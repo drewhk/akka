@@ -6,22 +6,42 @@ package akka.remote.artery
 import java.io.{ File, RandomAccessFile }
 import java.nio.{ ByteBuffer, ByteOrder }
 import java.nio.channels.FileChannel
+import java.nio.charset.Charset
 import java.nio.file.StandardOpenOption
 import java.util.concurrent.atomic.AtomicBoolean
 
 import akka.actor.{ ExtendedActorSystem, Extension, ExtensionId, ExtensionIdProvider }
+import akka.stream.{ ActorMaterializer, Materializer }
 import akka.util.ByteString
 import org.agrona.BitUtil
 import org.agrona.concurrent.MappedResizeableBuffer
 
 import scala.annotation.tailrec
 
+object EventSink {
+  val UsAscii = Charset.forName("US-ASCII")
+}
+
 /**
  * INTERNAL API
  */
 private[remote] trait EventSink {
   def alert(code: Int, metadata: Array[Byte]): Unit
+
+  /**
+   * Prefer the Array[Byte] version whenever possible
+   */
+  def alert(code: Int, metadata: String): Unit =
+    alert(code, metadata.getBytes(EventSink.UsAscii))
+
   def loFreq(code: Int, metadata: Array[Byte]): Unit
+
+  /**
+   * Prefer the Array[Byte] version whenever possible
+   */
+  def loFreq(code: Int, metadata: String): Unit =
+    loFreq(code, metadata.getBytes(EventSink.UsAscii))
+
   def hiFreq(code: Long, param: Long): Unit
 
   def flushHiFreqBatch(): Unit
@@ -203,6 +223,8 @@ private[remote] object FlightRecorder {
 private[akka] object FlightRecorderExtension extends ExtensionId[FlightRecorder] with ExtensionIdProvider {
 
   override def lookup(): FlightRecorderExtension.type = FlightRecorderExtension
+
+  def apply(materializer: Materializer): FlightRecorder = apply(ActorMaterializer.downcast(materializer).system)
 
   override def createExtension(system: ExtendedActorSystem): FlightRecorder = {
     // TODO: Figure out where to put it, currently using temporary files
