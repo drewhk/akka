@@ -54,7 +54,8 @@ object AkkaBuild extends Build {
   lazy val aggregatedProjects: Seq[ProjectReference] = Seq(
     actor,
     actorTests,
-    agent,
+    // Akka-Agent is not built until it is released for Scala 2.12
+    //agent,
     benchJmh,
     camel,
     cluster,
@@ -103,7 +104,7 @@ object AkkaBuild extends Build {
     base = file("akka-scala-nightly"),
     // remove dependencies that we have to build ourselves (Scala STM)
     // samples don't work with dbuild right now
-    aggregate = aggregatedProjects diff List(agent, docs, samples)
+    aggregate = aggregatedProjects diff List(docs, samples)
   ).disablePlugins(ValidatePullRequest, MimaPlugin)
 
   lazy val actor = Project(
@@ -204,11 +205,11 @@ object AkkaBuild extends Build {
     dependencies = Seq(actor, testkit % "test->test")
   )
 
-  lazy val agent = Project(
-    id = "akka-agent",
-    base = file("akka-agent"),
-    dependencies = Seq(actor, testkit % "test->test")
-  )
+//  lazy val agent = Project(
+//    id = "akka-agent",
+//    base = file("akka-agent"),
+//    dependencies = Seq(actor, testkit % "test->test")
+//  )
 
   lazy val persistence = Project(
     id = "akka-persistence",
@@ -354,7 +355,7 @@ object AkkaBuild extends Build {
     dependencies = Seq(
       actor,
       testkit % "compile;test->test",
-      remote % "compile;test->test", cluster, clusterMetrics, slf4j, agent, camel, osgi,
+      remote % "compile;test->test", cluster, clusterMetrics, slf4j, camel, osgi,
       persistence % "compile;provided->provided;test->test", persistenceTck, persistenceQuery,
       typed % "compile;test->test", distributedData,
       stream, streamTestkit % "compile;test->test",
