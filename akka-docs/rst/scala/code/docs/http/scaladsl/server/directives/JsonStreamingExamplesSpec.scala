@@ -132,10 +132,9 @@ class JsonStreamingExamplesSpec extends RoutingSpec {
 
     Get("/tweets").withHeaders(AcceptCsv) ~> route ~> check {
       responseAs[String] shouldEqual
-        """|1,#Akka rocks!
-           |2,Streaming is so hot right now!
-           |3,You cannot enter the same river twice."""
-        .stripMargin
+        "1,#Akka rocks!" + "\n" +
+        "2,Streaming is so hot right now!" + "\n" +
+        "3,You cannot enter the same river twice."
     }
   }
 

@@ -16,6 +16,7 @@ import akka.testkit.AkkaSpec
 import akka.http.scaladsl.{ Http, TestUtils }
 import akka.http.scaladsl.model._
 import akka.stream.testkit.Utils
+import org.scalactic.source.Position
 import org.scalatest.concurrent.ScalaFutures
 
 class HighLevelOutgoingConnectionSpec extends AkkaSpec {
@@ -38,8 +39,7 @@ class HighLevelOutgoingConnectionSpec extends AkkaSpec {
         .mapAsync(4)(_.entity.toStrict(1.second))
         .map { r ⇒ val s = r.data.utf8String; log.debug(s); s.toInt }
         .runFold(0)(_ + _)
-
-      result.futureValue(PatienceConfig(10.seconds)) shouldEqual N * (N + 1) / 2
+      result.futureValue(PatienceConfig(10.seconds), Position.here) should ===(N * (N + 1) / 2)
       binding.futureValue.unbind()
     }
 
@@ -73,7 +73,7 @@ class HighLevelOutgoingConnectionSpec extends AkkaSpec {
         .map { r ⇒ val s = r.data.utf8String; log.debug(s); s.toInt }
         .runFold(0)(_ + _)
 
-      result.futureValue(PatienceConfig(10.seconds)) shouldEqual C * N * (N + 1) / 2
+      result.futureValue(PatienceConfig(10.seconds), Position.here) should ===(C * N * (N + 1) / 2)
       binding.futureValue.unbind()
     }
 

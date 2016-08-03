@@ -7,6 +7,7 @@ import akka.stream._
 import akka.stream.scaladsl._
 import akka.stream.testkit.StreamSpec
 import org.reactivestreams.{ Publisher, Subscriber, Subscription }
+import org.scalactic.source.Position
 
 import scala.concurrent.duration._
 
@@ -136,14 +137,14 @@ class StreamLayoutSpec extends StreamSpec {
             (f, i) ⇒ f.map(identity))
         val (mat, fut) = g.toMat(Sink.seq)(Keep.both).run()
         mat should ===(1)
-        fut.futureValue(veryPatient) should ===(List(42))
+        fut.futureValue(veryPatient, Position.here) should ===(List(42))
       }
 
       "starting from a Flow" in {
         val g = (1 to tooDeepForStack).foldLeft(Flow[Int])((f, i) ⇒ f.map(identity))
         val (mat, fut) = g.runWith(Source.single(42).mapMaterializedValue(_ ⇒ 1), Sink.seq)
         mat should ===(1)
-        fut.futureValue(veryPatient) should ===(List(42))
+        fut.futureValue(veryPatient, Position.here) should ===(List(42))
       }
 
       "using .via" in {
@@ -152,7 +153,7 @@ class StreamLayoutSpec extends StreamSpec {
             (f, i) ⇒ f.via(Flow[Int].map(identity)))
         val (mat, fut) = g.toMat(Sink.seq)(Keep.both).run()
         mat should ===(1)
-        fut.futureValue(veryPatient) should ===(List(42))
+        fut.futureValue(veryPatient, Position.here) should ===(List(42))
       }
     }
 
@@ -164,14 +165,14 @@ class StreamLayoutSpec extends StreamSpec {
             (f, i) ⇒ f.map(identity)))
         val (mat, fut) = g.toMat(Sink.seq)(Keep.both).run()
         mat should ===(1)
-        fut.futureValue(veryPatient) should ===(List(42))
+        fut.futureValue(veryPatient, Position.here) should ===(List(42))
       }
 
       "starting from a Flow" in {
         val g = Flow fromGraph Fusing.aggressive((1 to tooDeepForStack).foldLeft(Flow[Int])((f, i) ⇒ f.map(identity)))
         val (mat, fut) = g.runWith(Source.single(42).mapMaterializedValue(_ ⇒ 1), Sink.seq)
         mat should ===(1)
-        fut.futureValue(veryPatient) should ===(List(42))
+        fut.futureValue(veryPatient, Position.here) should ===(List(42))
       }
 
       "using .via" in {
@@ -180,7 +181,7 @@ class StreamLayoutSpec extends StreamSpec {
             (f, i) ⇒ f.via(Flow[Int].map(identity))))
         val (mat, fut) = g.toMat(Sink.seq)(Keep.both).run()
         mat should ===(1)
-        fut.futureValue(veryPatient) should ===(List(42))
+        fut.futureValue(veryPatient, Position.here) should ===(List(42))
       }
     }
 
